@@ -64,8 +64,9 @@ const float SMOOTH   = 0.25f;   // audio level smoothing
 
 // ---- render defaults (G command overrides them) ----
 #define DEFAULT_CAP           60      // channel ceiling, 40 was v2.1's BRIGHTNESS
-#define DEFAULT_GAMMA         1       // 0 linear, 1 = 2.2, 2 = 2.8
+#define DEFAULT_GAMMA         0       // 0 linear, 1 = 2.2, 2 = 2.8
 #define DEFAULT_DITHER        1
+#define DITHER_MIN            8       // below this a 1-LSB toggle is visible flicker
 
 // ---- transients (values inherited from v2.1) ----
 #define BLINK_CLOSE_MS        120
@@ -79,7 +80,7 @@ const float SMOOTH   = 0.25f;   // audio level smoothing
 // ---- fallback look: what the lamp is when nobody is talking to it ----
 #define FB_HUE                30.0f
 #define FB_SAT                200.0f
-#define FB_VAL                96.0f
+#define FB_VAL                120.0f
 #define FB_GRAD               6.0f
 #define FB_WAVE_N             1.0f
 #define FB_WAVE_AMP           5.0f
@@ -402,8 +403,12 @@ void renderFrame(uint32_t now, float sleep) {
     // perceptual -> linear, then the hardware ceiling, then dither.
     float lin = gammaEncode(v) * (gCap / 255.0f);
     uint16_t v12 = (uint16_t)(lin * 255.0f * 16.0f + 0.5f);
-    if (gDither) v12 += DITHER4[i & 3][(distIdx + (int)(i >> 1)) & 3];
     uint16_t out = v12 >> 4;
+    // Below DITHER_MIN one code step is a doubling of the light, so the
+    // "smoothing" would show up as a 50 Hz flicker. Stay quantised down there.
+    if (gDither && out >= DITHER_MIN) {
+      out = (v12 + DITHER4[i & 3][(distIdx + (int)(i >> 1)) & 3]) >> 4;
+    }
     if (out > gCap) out = gCap;
 
     renderOut[i] = (uint8_t)out;

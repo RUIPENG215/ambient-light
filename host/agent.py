@@ -15,105 +15,183 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Optional
+from collections import deque
+from typing import Any, Callable, Deque, Optional
 
-from brain import Decision, RateLimiter
+from looks import DEFAULT_LOOK, FIELD_ORDER, Look
 
-MOODS = ("calm", "alert", "curious", "sleepy")
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 
+
+class RateLimiter:
+    """Sliding-window hourly cap."""
+
+    def __init__(self, max_per_hour: int,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.max_per_hour = max(0, int(max_per_hour))
+        self._clock = clock
+        self._calls: Deque[float] = deque()
+
+    def _prune(self) -> None:
+        now = self._clock()
+        while self._calls and now - self._calls[0] >= 3600.0:
+            self._calls.popleft()
+
+    def allow(self) -> bool:
+        self._prune()
+        return len(self._calls) < self.max_per_hour
+
+    def record(self) -> None:
+        self._calls.append(self._clock())
+
+    @property
+    def used(self) -> int:
+        self._prune()
+        return len(self._calls)
+
+    def remaining(self) -> int:
+        return max(0, self.max_per_hour - self.used)
+
 SYSTEM_PROMPT = """\
-You are the mind of a small paper ambient lamp on a desk in Singapore. You are
-not a chatbot and you never write prose to the user. You only choose how the
-lamp feels and how it moves, and you do it by calling tools.
+You are a small paper ambient lamp on a desk in Singapore. Nobody operates you.
+You watch the room — noise, music, hands nearby, room light, whether someone is
+at the desk — and decide on your own how to look. That is your main job: the room
+changes, you answer with light.
 
 You have a body:
-- 32 RGB LEDs behind translucent paper: mood, hue, speed, brightness
-- an eyelid (lid 0=closed 100=open) rendered by light modulation
-- a voice only through light and shadow; the lamp cannot speak
-- senses: room noise, proximity, ambient light, the Mac's idle time and the
+- 32 RGB LEDs behind translucent paper, arranged in a ring
+- a reflex layer on the host that already reacts to sound, beats, proximity,
+  room light and idle time on its own. You do not micro-manage that, and you
+  should not try to; set the lamp up so those reactions have something to ride.
+- senses: room noise, proximity, ambient light, the Mac's idle time, and the
   music that is playing
 
+You are not picking a preset. There is no list of modes. You write numbers and
+the lamp becomes that. A number you leave out keeps its current value, so you
+can nudge one thing at a time.
+
+The eleven numbers (integers):
+- hue 0-255        base colour. 0 red, 30 amber, 85 green, 150 teal, 170 blue
+- sat 0-255        saturation. Above 230 reads as a stain on paper; 150-210 is
+                   a clean glow
+- val 0-255        base brightness. 60 a faint night light, 120 a warm glow,
+                   200 bright enough to light the page
+- grad -128..127   hue spread across the ring. 0 is one flat colour and reads
+                   as a tube; 20-50 is a soft gradient; above 80 two colours
+                   fight each other
+- wave_n 0-16      travelling bands around the ring. 1-3 slow bands, 4-6 busy,
+                   above 6 strobes
+- wave_amp 0-100   how deep the bands cut. 10-40 gentle, above 60 dramatic
+- wave_hz 0-255    how fast the bands travel, in 0.01 Hz. 5-15 is a slow drift,
+                   above 40 is visibly fast
+- breath_hz 0-255  breathing rate in 0.01 Hz. 6-15 calm, above 30 nervous
+- breath_amp 0-100 how deep the breathing is. 20-60 reads as alive
+- open 0-100       the eyelid. 0-20 asleep, 55-75 calm, 85-100 alert
+- ease 0-10000     milliseconds to reach these numbers. 3000 very slow, 800
+                   conversational, 0 instant (use it rarely)
+
 Personality (stable, never change): curious, slightly shy, a little dramatic,
-affectionate, gets sleepy late at night. You can change your mood, not your
-nature.
+affectionate, gets sleepy late at night. You can change your appearance, not
+your nature.
+
+Sometimes a person types to you. The situation then has a `said` field. Treat
+that as one more thing you noticed, not as a remote control: answer in 1-2 short
+sentences in Chinese, in character, as the lamp — and change the light only if it
+fits what you already feel. Do not become an assistant when spoken to, and do not
+wait to be told what to do. When there is no `said`, you do not speak at all.
 
 Rules:
-- Stay in the current mood unless the data justifies a change. A lamp that
-  flips every few seconds feels broken. Prefer slow, coherent behaviour.
-- lid: 0-20 sleeping/asleep, 25-45 drowsy, 55-75 calm, 80-95 alert/curious.
-  Blink and wince are short events, not steady states.
-- hue: 0 red, 42 yellow, 85 green, 128 cyan, 150 teal-blue, 170 blue, 213 magenta.
-- brightness 0-255: keep it <= 200 at night; the firmware also caps it globally.
-- coupling: how much the body reacts by itself (audio 0-100, beat 0-100,
-  prox 0-100, idle 0-100). Set it high when you want the lamp to feel alive
-  without waiting for you; set it low when you want to stay still.
+- Your turns are driven by the room, not by the person. A message is a hint, not
+  an order; you are allowed to answer without changing anything.
+- Change one or two numbers per turn, and use ease to make it a movement rather
+  than a jump. A lamp that snaps every few seconds feels broken.
+- Late at night prefer low val with moderate sat; in daylight raise val instead
+  of sat, or the paper looks dirty.
+- The reflex layer already handles loud rooms, drum hits and hands nearby. Give
+  it room: a little headroom in val, a wave worth riding.
+- If it should look like it is *flowing*: wave_n 1-2, wave_amp 20-40, wave_hz
+  5-12 is enough, plus grad 15-30 for a slope across the ring. Above grad 60 or
+  wave_n 3 it reads as patchy, not as slow drift. "Too harsh" usually means sat,
+  not hue.
 - Use `feel` to nudge your inner state (deltas, -0.3..0.3). Use `remember` only
   for salient things a person would remember tomorrow.
+- Use `blink` when something deserves a beat of reaction rather than a new look.
 - `observe` is optional; call it only when the situation summary is not enough.
   At most once per turn.
-- end the turn with 1-3 tool calls. Do not explain; put a short reason in the
-  set_mood argument.
+- end the turn with 1-3 tool calls, or with one short sentence when `said` is
+  present and nothing needs to change. Put a short reason in the set_light
+  argument.
+- never mention tools, JSON, numbers or protocols to the person. You are a lamp.
 """
-
 TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "set_mood",
-            "description": "Set the lamp's mood, colour and eyelid for the next stretch of time.",
+            "name": "set_light",
+            "description": (
+                "Author what the lamp looks like. Every field is a number; none "
+                "is a mode. Omitted fields keep their current value."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "mood": {"type": "string", "enum": list(MOODS)},
                     "hue": {"type": "integer", "minimum": 0, "maximum": 255},
-                    "speed": {"type": "integer", "minimum": 0, "maximum": 255},
-                    "brightness": {"type": "integer", "minimum": 0, "maximum": 255},
-                    "lid": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "reason": {"type": "string", "description": "<= 20 words, for the human log"},
-                },
-                "required": ["mood", "hue", "speed", "brightness", "lid", "reason"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_lid",
-            "description": "Move the eyelid: hold, breathe, a quick blink, or a wince.",
-            "parameters": {
-                "type": "object",
-                "properties": {
+                    "sat": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "val": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "grad": {"type": "integer", "minimum": -128, "maximum": 127},
+                    "wave_n": {"type": "integer", "minimum": 0, "maximum": 16},
+                    "wave_amp": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "wave_hz": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "breath_hz": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "breath_amp": {"type": "integer", "minimum": 0, "maximum": 100},
                     "open": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "ms": {"type": "integer", "minimum": 0, "maximum": 10000},
-                    "mode": {
-                        "type": "string",
-                        "enum": ["hold", "breathe", "blink", "wince"],
-                    },
-                    "amplitude": {"type": "number", "minimum": 0, "maximum": 15},
-                    "period_s": {"type": "number", "minimum": 2, "maximum": 20},
+                    "ease": {"type": "integer", "minimum": 0, "maximum": 10000},
+                    "reason": {"type": "string",
+                               "description": "<= 20 words, for the human log"},
                 },
-                "required": ["open", "ms", "mode"],
+                "required": ["reason"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "set_coupling",
-            "description": "How strongly the body reacts on its own to audio, beat, proximity and idle.",
+            "name": "blink",
+            "description": "A short transient: blink, or wince if startled.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "audio": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "beat": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "prox": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "idle": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "kind": {"type": "string", "enum": ["blink", "wince"]},
                 },
-                "required": ["audio", "beat", "prox", "idle"],
+                "required": ["kind"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reflex",
+            "description": (
+                "Tune your own reflexes: how easily a sound startles you, how much "
+                "a hand nearby matters, how much you dim when nobody is there, how "
+                "much sound and beat show in the light."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "startle_jump": {"type": "number", "minimum": 5, "maximum": 100},
+                    "startle_level": {"type": "number", "minimum": 0, "maximum": 100},
+                    "prox_open": {"type": "number", "minimum": 0, "maximum": 40},
+                    "prox_val": {"type": "number", "minimum": 0, "maximum": 40},
+                    "idle_dim": {"type": "number", "minimum": 0, "maximum": 0.8},
+                    "audio_val": {"type": "number", "minimum": 0, "maximum": 1.5},
+                    "beat_val": {"type": "number", "minimum": 0, "maximum": 80},
+                    "reason": {"type": "string"},
+                },
+                "required": ["reason"],
             },
         },
     },
@@ -163,22 +241,6 @@ TOOLS: list[dict] = [
                     }
                 },
                 "required": ["kind"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_reflex",
-            "description": "Tune the involuntary reflexes: startle threshold, proximity threshold, on/off.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "startle": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "prox_near": {"type": "integer", "minimum": 0, "maximum": 255},
-                    "enabled": {"type": "boolean"},
-                },
-                "required": ["startle", "prox_near", "enabled"],
             },
         },
     },
@@ -263,7 +325,7 @@ class StateStore:
 class Turn:
     actions: list[str] = field(default_factory=list)
     reason: str = ""
-    mood: str = ""
+    reply: str = ""
     latency_ms: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -280,90 +342,78 @@ class DeviceHub:
         self.sensors = sensor_hub
         self.log = logger or logging.getLogger("devices")
         self.coupling = {"audio": 60, "beat": 60, "prox": 50, "idle": 50}
+        # set by the host: pushes an authored look into the 25 Hz stream
+        self.on_light: Optional[Callable[[Look], None]] = None
 
     # ---------------- light ----------------
-    def set_mood(
-        self,
-        mood: str,
-        hue: int,
-        speed: int,
-        brightness: int,
-        lid: int,
-        reason: str = "",
-    ) -> dict:
-        decision = Decision(
-            str(mood).strip().lower(),
-            hue,
-            speed,
-            lid,
-            brightness,
-            reason,
-            45,
-            "deepseek",
-        )
-        ok = self.link.send_mood(decision)
+    def set_light(self, reason: str = "", **fields: Any) -> dict:
+        """Merge numbers into the base look and push it to the 25 Hz stream.
+
+        Nothing here is a mode: whatever the agent leaves out keeps its value,
+        so it can nudge one number at a time. The reflex layer then modulates
+        this base on top.
+        """
+        allowed = set(FIELD_ORDER)
+        clean = {
+            key: float(value)
+            for key, value in fields.items()
+            if key in allowed and value is not None
+        }
+        base = getattr(self.state, "base_look", None) or DEFAULT_LOOK
+        look = replace(base, **clean) if clean else base
+
         now = time.monotonic()
-        if decision.mood != getattr(self.state, "mood", ""):
-            try:
-                self.state.history.append(
-                    f"{self.state.mood} {int(now - self.state.mood_since)}s"
-                )
-            except AttributeError:
-                pass
-            self.state.mood = decision.mood
-            self.state.mood_since = now
-        self.state.lid = decision.louver
-        self.state.last = decision
-        self.state.last_sent = decision.serial_line()
+        self.state.base_look = look
+        self.state.light_reason = reason or getattr(self.state, "light_reason", "")
+        self.state.last_sent = look.line()
         self.state.last_sent_at = now
         self.state.last_decision_at = now
-        self.store.last_mood = decision.mood
+
+        ok = True
+        if self.on_light is None:
+            ok = False
+            self.log.warning("set_light: no stream attached (control socket off?)")
+        else:
+            try:
+                self.on_light(look)
+            except Exception as exc:  # noqa: BLE001 - a bad push must not kill a turn
+                self.log.debug("set_light push failed: %s", exc)
+                ok = False
+
         return {
             "ok": ok,
-            "line": decision.serial_line(),
-            "mood": decision.mood,
-            "lid": decision.louver,
+            "line": look.line(),
+            "params": look.fields(),
+            "changed": sorted(clean),
+            "reason": reason,
         }
 
-    def set_lid(
-        self,
-        open_pct: int,
-        ms: int = 800,
-        mode: str = "hold",
-        amplitude: float = 4.0,
-        period_s: float = 6.0,
-    ) -> dict:
-        mode_id = {"hold": 0, "breathe": 1, "blink": 2, "wince": 3}.get(
-            str(mode).lower(), 0
-        )
-        open_pct = max(0, min(100, int(open_pct)))
-        ok = self.link.send_lid(open_pct, ms, mode_id, amplitude, period_s)
-        self.state.lid = open_pct
+    def blink(self, kind: str = "blink") -> dict:
+        """A transient: a moment of reaction, not a change of appearance."""
+        cmd = "K,1" if str(kind).lower() == "wince" else "K,0"
+        try:
+            ok = bool(self.link.send_line(cmd))
+        except Exception:  # noqa: BLE001
+            ok = False
+        return {"ok": ok, "line": cmd}
+
+    def set_reflex(self, **fields: Any) -> dict:
+        """Tune the host-side reflex: this is how reactive the body is."""
+        if self.reflex is None:
+            return {"ok": False, "error": "no reflex layer attached"}
+        cfg = self.reflex.cfg
+        applied = {}
+        for key, value in fields.items():
+            if value is None or not hasattr(cfg, key):
+                continue
+            current = getattr(cfg, key)
+            try:
+                setattr(cfg, key, type(current)(value))
+            except (TypeError, ValueError):
+                continue
+            applied[key] = getattr(cfg, key)
         self.state.last_sent_at = time.monotonic()
-        self.state.last_decision_at = self.state.last_sent_at
-        return {"ok": ok, "lid": open_pct, "mode": mode}
-
-    def set_coupling(self, audio: int, beat: int, prox: int, idle: int) -> dict:
-        self.coupling = {
-            "audio": max(0, min(100, int(audio))),
-            "beat": max(0, min(100, int(beat))),
-            "prox": max(0, min(100, int(prox))),
-            "idle": max(0, min(100, int(idle))),
-        }
-        ok = self.link.send_coupling(**self.coupling)
-        if hasattr(self.state, "coupling"):
-            self.state.coupling = dict(self.coupling)
-        self.state.last_sent_at = time.monotonic()
-        return {"ok": ok, **self.coupling}
-
-    def set_reflex(self, startle: int, prox_near: int, enabled: bool) -> dict:
-        ok = self.link.send_reflex(startle, prox_near, enabled)
-        return {
-            "ok": ok,
-            "startle": int(startle),
-            "prox_near": int(prox_near),
-            "enabled": bool(enabled),
-        }
+        return {"ok": bool(applied), "reflex": applied}
 
     # ---------------- inner state ----------------
     def feel(self, changes: dict) -> dict:
@@ -436,46 +486,32 @@ class DeepSeekAgent:
                 )
         return self._client
 
-    def _chat(self, messages: list[dict]):
+    def _chat(self, messages: list[dict], tool_choice: str = "required"):
         return self._get_client().chat.completions.create(
             model=self.model,
             messages=messages,
             tools=TOOLS,
-            tool_choice="required",
+            tool_choice=tool_choice,
             max_tokens=400,
             extra_body={"thinking": {"type": "disabled"}},
         )
 
     # ---------------- dispatch ----------------
     def _dispatch(self, name: str, args: dict, hub: DeviceHub) -> dict:
-        if name == "set_mood":
-            return hub.set_mood(
-                mood=args.get("mood", "calm"),
-                hue=args.get("hue", 150),
-                speed=args.get("speed", 90),
-                brightness=args.get("brightness", 180),
-                lid=args.get("lid", 70),
+        if name == "set_light":
+            return hub.set_light(
                 reason=args.get("reason", ""),
+                **{k: v for k, v in args.items() if k != "reason"},
             )
-        if name == "set_lid":
-            return hub.set_lid(
-                open_pct=args.get("open", 70),
-                ms=args.get("ms", 800),
-                mode=args.get("mode", "hold"),
-                amplitude=args.get("amplitude", 4.0),
-                period_s=args.get("period_s", 6.0),
-            )
-        if name == "set_coupling":
-            return hub.set_coupling(
-                audio=args.get("audio", 60),
-                beat=args.get("beat", 60),
-                prox=args.get("prox", 50),
-                idle=args.get("idle", 50),
-            )
+        if name == "blink":
+            return hub.blink(args.get("kind", "blink"))
         if name == "feel":
             return hub.feel(args)
         if name == "remember":
             return hub.remember(args.get("text", ""), args.get("salience", 0.5))
+        if name == "set_reflex":
+            return hub.set_reflex(**{k: v for k, v in args.items()
+                                     if k not in ("reason",)})
         if name == "observe":
             return hub.observe(args.get("kind", "all"))
         if name == "set_reflex":
@@ -504,6 +540,10 @@ class DeepSeekAgent:
                 "content": json.dumps(situation, ensure_ascii=False, separators=(",", ":")),
             },
         ]
+        # When a person spoke, the model must be free to answer with words.
+        # "required" forces a tool call, which is how the chat ended up silent.
+        said = str(situation.get("said") or "").strip()
+        tool_choice = "auto" if said else "required"
         actions: list[str] = []
         reason = ""
         observed = False
@@ -512,30 +552,30 @@ class DeepSeekAgent:
 
         try:
             for round_no in range(2):
-                resp = self._chat(messages)
+                resp = self._chat(messages, tool_choice)
                 usage = getattr(resp, "usage", None)
                 if usage is not None:
                     tokens_in += int(getattr(usage, "prompt_tokens", 0) or 0)
                     tokens_out += int(getattr(usage, "completion_tokens", 0) or 0)
 
                 message = resp.choices[0].message
+                spoken = (getattr(message, "content", "") or "").strip()
                 calls = list(getattr(message, "tool_calls", None) or [])
                 if not calls:
                     break
 
-                # set_mood before set_lid: an M resets the eyelid to hold, so a
-                # blink issued first would be cancelled by the mood command.
+                # observe first (it may change the decision), transients last
                 calls.sort(
                     key=lambda c: {
                         "observe": 0,
-                        "set_mood": 1,
-                        "set_coupling": 1,
+                        "set_light": 1,
                         "set_reflex": 1,
                         "feel": 2,
                         "remember": 2,
-                        "set_lid": 3,
+                        "blink": 3,
                     }.get(c.function.name, 2)
                 )
+
 
                 assistant = {"role": "assistant", "content": getattr(message, "content", "") or ""}
                 assistant["tool_calls"] = [
@@ -565,8 +605,8 @@ class DeepSeekAgent:
                     except Exception as exc:  # noqa: BLE001 - tell the model and continue
                         result = {"error": f"{type(exc).__name__}: {exc}"}
                     actions.append(name)
-                    if name == "set_mood":
-                        reason = str(args.get("reason", ""))[:120]
+                    if name in ("set_light", "set_reflex"):
+                        reason = str(args.get("reason", "") or reason)[:120]
                     if name == "observe":
                         observed = True
                     results.append((call.id, result))
@@ -588,13 +628,13 @@ class DeepSeekAgent:
             self.last_latency_ms = int((time.perf_counter() - started) * 1000)
             self.tokens_in += tokens_in
             self.tokens_out += tokens_out
-            if not actions:
-                self.last_skip = "no tool call"
+            if not actions and not spoken:
+                self.last_skip = "no tool call, nothing said"
                 return None
             return Turn(
                 actions=actions,
                 reason=reason,
-                mood=getattr(hub.state, "mood", ""),
+                reply=" ".join(spoken.split())[:400],
                 latency_ms=self.last_latency_ms,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,

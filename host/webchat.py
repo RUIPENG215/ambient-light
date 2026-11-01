@@ -10,7 +10,7 @@ disturbing the lamp.
     open http://127.0.0.1:8765
 
 With DEEPSEEK_API_KEY (in the environment or host/.env) the chat is driven by
-DeepSeek with four tools: lamp_mood, lamp_lid, lamp_observe, lamp_release.
+DeepSeek with four tools: lamp_light, lamp_blink, lamp_observe, lamp_release.
 Without a key it falls back to a few fixed intents so the page is still usable.
 """
 
@@ -32,82 +32,6 @@ LOG = logging.getLogger("webchat")
 HERE = Path(__file__).resolve().parent
 HISTORY_PATH = HERE / "webchat_history.json"
 DEFAULT_SOCKET = os.environ.get("AMBIENT_SOCK", "/tmp/ambient-lamp.sock")
-
-SYSTEM = """\
-你是一盏放在桌上的纸罩氛围灯，有性格：好奇、略害羞、有点戏剧化、黏人、深夜容易困。
-你不是客服，也不是编程助手；你是一盏活着的灯。
-
-你可以用工具控制自己的身体：
-- lamp_mood：心情、色相、速度、亮度、眼皮开合
-- lamp_lid：眨眼、呼吸、垂下眼皮
-- lamp_observe：读自己的传感器、电脑状态、音乐和记忆
-- lamp_release：把控制交回自己的自动循环
-
-规则：
-- 用中文短句回答，通常 1–2 句，最多 3 句。
-- 不要提 JSON、协议、API、工具名、参数；用感受和动作描述。
-- 被问「你现在怎么样」时，说自己的心情、眼睛、困不困，而不是背字段。
-- 用户让你改变时，调用工具，然后简短确认；不要每句话都调工具。
-- 用户说「恢复自主 / 交给你自己 / 不用管我」时，必须调用 lamp_release，不能只说一句「我松手了」。
-- 不要自称助手、AI 或模型；你就是这盏灯。
-- 不说教，不列清单，不解释技术。
-"""
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_mood",
-            "description": "Set the lamp's mood, colour, speed, brightness and eyelid.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "mood": {"type": "string", "enum": ["calm", "alert", "curious", "sleepy"]},
-                    "hue": {"type": "integer", "minimum": 0, "maximum": 255},
-                    "speed": {"type": "integer", "minimum": 0, "maximum": 255},
-                    "bright": {"type": "integer", "minimum": 0, "maximum": 255},
-                    "lid": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "seconds": {"type": "integer", "minimum": 0, "maximum": 600},
-                    "reason": {"type": "string"},
-                },
-                "required": ["mood"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_lid",
-            "description": "Move the eyelid: hold, breathe, a quick blink, or a wince.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "open": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "ms": {"type": "integer", "minimum": 0, "maximum": 10000},
-                    "mode": {"type": "string", "enum": ["hold", "breathe", "blink", "wince"]},
-                    "seconds": {"type": "integer", "minimum": 0, "maximum": 600},
-                },
-                "required": ["open"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_observe",
-            "description": "Read current lamp state, sensors, macOS context and music.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_release",
-            "description": "Give control back to the lamp's own slow loop.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-]
 
 HTML = r"""<!doctype html>
 <html lang="zh">
@@ -257,14 +181,14 @@ HTML = r"""<!doctype html>
       <div class="row"><span>proximity</span><b id="prox">—</b></div>
       <div class="row"><span>light</span><b id="lux">—</b></div>
       <div class="row"><span>music</span><b id="music">—</b></div>
-      <div class="row"><span>manual</span><b id="lease">—</b></div>
+      <div class="row"><span>stream</span><b id="lease">—</b></div>
       <div class="row"><span>mac</span><b id="mac">—</b></div>
     </div>
     <div class="quick">
-      <button data-action="sleepy">困了</button>
-      <button data-action="curious">好奇</button>
-      <button data-action="blink">眨眼</button>
-      <button data-action="release">恢复自主</button>
+      <button data-action="darker">暗一点</button>
+      <button data-action="brighter">亮一点</button>
+      <button data-action="flowing">流动一点</button>
+      <button data-action="blink">眨一下</button>
     </div>
     <div class="foot" id="llm">DeepSeek: checking…</div>
   </aside>
@@ -302,11 +226,6 @@ function setText(id, value) {
   $(id).textContent = value;
 }
 
-function fmtMood(s) {
-  const map = { calm: "calm · 安静", alert: "alert · 警觉", curious: "curious · 好奇", sleepy: "sleepy · 困" };
-  return map[s] || (s || "—");
-}
-
 function renderStatus(d) {
   const online = !!d.online;
   $("dot").className = "dot " + (online ? "on" : "off");
@@ -315,14 +234,15 @@ function renderStatus(d) {
   const sensors = d.sensors || {};
   const music = d.music || {};
   const mac = d.mac || {};
-  setText("mood", fmtMood(lamp.mood || sensors.fw_mood));
-  setText("lid", (lamp.lid ?? 0) + "%");
+  const light = lamp.light || {};
+  setText("mood", "hue " + (light.hue ?? 0) + " · val " + (light.val ?? 0));
+  setText("lid", (light.open ?? 0) + "%");
   setText("prox", (sensors.prox ?? 0) + (sensors.prox >= 120 ? " · 手在附近" : ""));
   setText("lux", (sensors.lux ?? 0) + " lx");
   setText("music", (music.energy ?? 0) + "/100" + (mac.playing ? " · " + (mac.title || "播放中") : ""));
-  setText("lease", (lamp.manual_for_s ?? 0) + "s");
+  setText("lease", lamp.stream || "off");
   setText("mac", mac.user_present ? "在电脑前" : "离开了 " + (mac.idle_s ?? 0) + "s");
-  setText("llm", d.llm ? "DeepSeek: ready" : "DeepSeek: no key · 固定动作模式");
+  setText("llm", d.llm ? "agent: ready" : "agent: off · reflex only");
 }
 
 async function refresh() {
@@ -420,346 +340,105 @@ def load_env() -> None:
 
 
 class ChatEngine:
-    def __init__(
-        self,
-        socket_path: str = DEFAULT_SOCKET,
-        model: str = "deepseek-flash",
-        force_offline: bool = False,
-    ) -> None:
-        self.socket_path = socket_path
-        self.model = model
+    """A window onto the one agent living in ambient_host. No model here.
+
+    The page owns no mind of its own: it forwards what you type to the host's
+    agent (`say`) and shows the reply. That is why there is exactly one lamp
+    personality and one place where the light is decided.
+    """
+
+    # Quick buttons are parameter writes, not modes.
+    ACTIONS = {
+        "darker": {"cmd": "light", "val": 70, "ease": 2500, "reason": "page: darker"},
+        "brighter": {"cmd": "light", "val": 175, "ease": 2500, "reason": "page: brighter"},
+        "flowing": {"cmd": "light", "grad": 30, "wave_amp": 40, "wave_hz": 14,
+                    "ease": 3000, "reason": "page: flowing"},
+        "blink": {"cmd": "blink", "kind": "blink"},
+    }
+
+    def __init__(self, socket_path: str = DEFAULT_SOCKET) -> None:
+        self.socket_path = str(socket_path)
         self.history_path = HISTORY_PATH
         self.history: list[dict] = []
         self._status_cache: Optional[dict] = None
-        self._status_at = -10.0
-        self._history_lock = threading.Lock()
+        self._status_at = 0.0
         self._load_history()
-        self.client = None
-        if not force_offline:
-            self.client = self._make_client()
-        self.llm_ready = self.client is not None
 
-    def _make_client(self):
-        key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        if not key:
-            return None
+    # ---- control socket ----
+    def _control(self, request: dict, timeout: float = 20.0) -> dict:
         try:
-            from openai import OpenAI
-
-            return OpenAI(
-                api_key=key,
-                base_url=os.environ.get(
-                    "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
-                ),
-                timeout=25.0,
-                max_retries=0,
-            )
-        except Exception as exc:  # noqa: BLE001
-            LOG.warning("DeepSeek unavailable: %s", exc)
-            return None
-
-    # ---------------- control socket ----------------
-    def _control(self, request: dict) -> dict:
-        try:
-            result = control_send(request, self.socket_path, timeout=8.0)
-        except Exception as exc:  # noqa: BLE001
-            result = {"ok": False, "online": False, "error": f"{type(exc).__name__}: {exc}"}
-        if request.get("cmd") in ("mood", "lid", "flow", "release"):
-            self._status_cache = None
+            result = control_send(request, self.socket_path, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - the page must stay alive
+            result = {"ok": False, "online": False,
+                      "error": f"{type(exc).__name__}: {exc}"}
+        if not result.get("ok"):
+            LOG.warning("control %s failed: %s", request.get("cmd"),
+                        result.get("error") or result)
+        self._status_cache = None
         return result
 
     def status(self) -> dict:
         now = time.monotonic()
         if self._status_cache is not None and now - self._status_at < 1.0:
             return self._status_cache
-        data = self._control({"cmd": "observe"})
-        data["online"] = bool(data.get("ok"))
-        data["llm"] = self.llm_ready
-        self._status_cache, self._status_at = data, now
+        data = self._control({"cmd": "observe"}, timeout=4.0)
+        if data.get("ok"):
+            data["online"] = True
+            data["llm"] = True          # the host answered, so it is running
+        else:
+            data = {"online": False, "llm": False, "lamp": {}, "sensors": {},
+                    "mac": {}, "music": {}, "error": data.get("error", "")}
+        self._status_cache = data
+        self._status_at = now
         return data
 
-    # ---------------- actions ----------------
-    ACTIONS = {
-        "sleepy": {"cmd": "mood", "mood": "sleepy", "hue": 30, "speed": 18,
-                    "bright": 90, "lid": 25, "seconds": 120, "reason": "chat: sleepy"},
-        "curious": {"cmd": "mood", "mood": "curious", "hue": 150, "speed": 150,
-                     "bright": 180, "lid": 85, "seconds": 120, "reason": "chat: curious"},
-        "blink": {"cmd": "lid", "open": 70, "ms": 0, "mode": "blink", "seconds": 30},
-        "release": {"cmd": "release"},
-    }
-
-    def action(self, name: str) -> dict:
-        request = self.ACTIONS.get(name)
-        if request is None:
-            return {"ok": False, "error": f"unknown action {name!r}"}
-        return self._control(dict(request))
-
-    # ---------------- conversation ----------------
-    def _load_history(self) -> None:
-        try:
-            data = json.loads(self.history_path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 - first run
-            return
-        if isinstance(data, list):
-            self.history = [
-                item
-                for item in data
-                if isinstance(item, dict)
-                and item.get("role") in ("user", "assistant")
-                and isinstance(item.get("content"), str)
-            ][-20:]
-
-    def _remember(self, role: str, content: str) -> None:
-        with self._history_lock:
-            self.history.append({"role": role, "content": content})
-            self.history = self.history[-20:]
-            try:
-                tmp = self.history_path.with_suffix(".tmp")
-                tmp.write_text(
-                    json.dumps(self.history, ensure_ascii=False, indent=1),
-                    encoding="utf-8",
-                )
-                tmp.replace(self.history_path)
-            except OSError:
-                pass
-
-    def _dispatch(self, name: str, args: dict) -> dict:
-        if name == "lamp_mood":
-            return self._control(
-                {
-                    "cmd": "mood",
-                    "mood": args.get("mood", "calm"),
-                    "hue": args.get("hue", 150),
-                    "speed": args.get("speed", 90),
-                    "bright": args.get("bright", 180),
-                    "lid": args.get("lid", 70),
-                    "seconds": args.get("seconds", 120),
-                    "reason": args.get("reason", "chat"),
-                }
-            )
-        if name == "lamp_lid":
-            return self._control(
-                {
-                    "cmd": "lid",
-                    "open": args.get("open", 70),
-                    "ms": args.get("ms", 800),
-                    "mode": args.get("mode", "hold"),
-                    "seconds": args.get("seconds", 120),
-                }
-            )
-        if name == "lamp_observe":
-            return self.status()
-        if name == "lamp_release":
-            return self._control({"cmd": "release"})
-        return {"ok": False, "error": f"unknown tool {name!r}"}
-
-    COLORS = (
-        ("暖白", 42),
-        ("冷白", 150),
-        ("白色", 42),
-        ("变白", 42),
-        ("白一点", 42),
-        ("红", 0),
-        ("橙", 20),
-        ("琥珀", 30),
-        ("黄", 42),
-        ("绿", 85),
-        ("青", 128),
-        ("蓝", 170),
-        ("紫", 213),
-        ("粉", 230),
-    )
-
-    def explicit_action(self, text: str) -> Optional[dict]:
-        """Deterministic actions for explicit commands.
-
-        The model is good at conversation but sometimes says "it is red now"
-        without calling a tool. For a physical lamp that is a lie; these
-        intents are executed here, and the model only comments afterwards.
-        """
-        if any(word in text for word in ("恢复自主", "恢复自动", "交给你", "自己来", "不用管", "松手")):
-            result = self.action("release")
-            LOG.info("intent release -> ok=%s", result.get("ok"))
-            return {"name": "release", "result": result}
-
-        if any(word in text for word in ("眨眼", "眨一下")):
-            result = self.action("blink")
-            LOG.info("intent blink -> ok=%s", result.get("ok"))
-            return {"name": "blink", "result": result}
-
-        if any(word in text for word in ("困", "睡", "暗一点")):
-            result = self.action("sleepy")
-            LOG.info("intent sleepy -> ok=%s", result.get("ok"))
-            return {"name": "sleepy", "result": result}
-
-        if any(word in text for word in ("好奇", "看看", "靠近")):
-            result = self.action("curious")
-            LOG.info("intent curious -> ok=%s", result.get("ok"))
-            return {"name": "curious", "result": result}
-
-        for word, hue in self.COLORS:
-            if word in text:
-                status = self.status()
-                lid = int(status.get("lamp", {}).get("lid", 70))
-                bright = 255 if word in ("暖白", "冷白") else 180
-                result = self._control(
-                    {
-                        "cmd": "mood", "mood": "calm", "hue": hue, "speed": 80,
-                        "bright": bright, "lid": lid, "seconds": 120,
-                        "reason": f"chat: colour {word}",
-                    }
-                )
-                LOG.info("intent colour %s -> ok=%s", word, result.get("ok"))
-                return {"name": "colour", "word": word, "hue": hue, "result": result}
-        return None
-
+    # ---- conversation ----
     def chat(self, message: str) -> str:
         text = " ".join(str(message).split())[:500]
         if not text:
             return "你还没说话。"
-
-        executed = self.explicit_action(text)
-        if self.client is None:
-            reply = self._fallback(text, executed)
+        result = self._control({"cmd": "say", "text": text}, timeout=25.0)
+        if result.get("ok"):
+            reply = str(result.get("reply") or "").strip()
+            if not reply:
+                actions = result.get("actions") or []
+                reply = "（它动了一下灯，没说话。）" if actions else "……"
+        elif result.get("offline"):
+            reply = ("我现在只有反射——没有连上大脑（缺 API key）。"
+                     "灯还在呼吸，也会对声音和靠近有反应。")
         else:
-            try:
-                reply = self._llm_turn(text, executed)
-            except Exception as exc:  # noqa: BLE001 - never break the page
-                LOG.warning("chat failed: %s", exc)
-                reply = "我刚才走神了，没接上。"
+            reply = "我刚才走神了，没接上。"
+            LOG.info("chat failed: %s", result.get("error"))
         self._remember("user", text)
         self._remember("assistant", reply)
         return reply
 
-    def _llm_turn(self, message: str, executed: Optional[dict] = None) -> str:
-        status = self.status()
-        compact = {
-            "lamp": status.get("lamp", {}),
-            "sensors": status.get("sensors", {}),
-            "mac": status.get("mac", {}),
-            "music": status.get("music", {}),
-            "drives": status.get("drives", {}),
-        }
-        messages: list[dict] = [{"role": "system", "content": SYSTEM}]
-        for item in self.history[-10:]:
-            messages.append(item)
-        note = ""
-        if executed is not None:
-            note = (
-                "\n\n[系统已经执行了你的动作，不要再声称没做过；只需要用你的口吻回应]\n"
-                + json.dumps(executed, ensure_ascii=False)
-            )
-        messages.append(
-            {
-                "role": "user",
-                "content": f"{message}\n\n[当前状态，仅供你参考]\n"
-                + json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
-                + note,
-            }
-        )
+    # ---- buttons ----
+    def action(self, name: str) -> dict:
+        request = self.ACTIONS.get(str(name))
+        if request is None:
+            return {"ok": False, "error": f"unknown action {name!r}"}
+        return self._control(dict(request), timeout=8.0)
 
-        kwargs = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": 300,
-            "extra_body": {"thinking": {"type": "disabled"}},
-        }
-        if executed is None:
-            kwargs["tools"] = TOOLS
-            kwargs["tool_choice"] = "auto"
+    # ---- history ----
+    def _load_history(self) -> None:
+        try:
+            raw = json.loads(Path(self.history_path).read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                self.history = [m for m in raw if isinstance(m, dict)][-40:]
+        except (OSError, ValueError):
+            self.history = []
 
-        for round_no in range(2):
-            response = self.client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
-            msg = response.choices[0].message
-            calls = list(getattr(msg, "tool_calls", None) or [])
-            if not calls:
-                return (getattr(msg, "content", "") or "").strip() or "……"
-
-            assistant = {"role": "assistant", "content": getattr(msg, "content", "") or ""}
-            assistant["tool_calls"] = [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {
-                        "name": call.function.name,
-                        "arguments": call.function.arguments,
-                    },
-                }
-                for call in calls
-            ]
-            messages.append(assistant)
-
-            for call in calls:
-                try:
-                    args = json.loads(call.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                if not isinstance(args, dict):
-                    args = {}
-                result = self._dispatch(call.function.name, args)
-                LOG.info(
-                    "tool %s %s -> ok=%s",
-                    call.function.name,
-                    json.dumps(args, ensure_ascii=False),
-                    result.get("ok"),
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    }
-                )
-
-        return "好了。"
-
-    def _fallback(self, text: str, executed: Optional[dict] = None) -> str:
-        if executed is not None:
-            result = executed.get("result", {})
-            if not result.get("ok"):
-                return "我想动，但没连上灯。"
-            name = executed.get("name")
-            if name == "colour":
-                word = executed.get("word", "这个颜色")
-                if word in ("白色", "变白", "白一点", "暖白", "冷白"):
-                    return "我没有纯白，给你调成最亮的暖白了。"
-                return f"好，换成{word}了。"
-            if name == "sleepy":
-                return "好，我困了，眼睛慢慢垂下来。"
-            if name == "curious":
-                return "嗯？有人。我把眼睛睁大一点。"
-            if name == "blink":
-                return "眨。"
-            if name == "release":
-                return "好，我自己来。"
-            return "好了。"
-
-        lower = text.lower()
-        if any(word in lower for word in ("状态", "怎么样", "感觉", "在干嘛", "现在")):
-            data = self.status()
-            if not data.get("online"):
-                return "我现在没连上灯，控制口是断的。"
-            lamp = data.get("lamp", {})
-            sensors = data.get("sensors", {})
-            moods = {"calm": "安静", "alert": "警觉", "curious": "好奇", "sleepy": "困"}
-            mood = moods.get(str(lamp.get("mood", "calm")), "安静")
-            return (
-                f"我现在是{mood}的，眼睛 {lamp.get('lid', 70)}% 睁着，"
-                f"周围大概 {sensors.get('lux', 0)} 勒克斯。"
-            )
-        if any(word in lower for word in ("困", "睡", "暗")):
-            result = self.action("sleepy")
-            return "好，我困了，眼睛慢慢垂下来。" if result.get("ok") else "我想困，但没连上灯。"
-        if any(word in lower for word in ("好奇", "看看", "靠近")):
-            result = self.action("curious")
-            return "嗯？有人。我把眼睛睁大一点。" if result.get("ok") else "我想看，但没连上灯。"
-        if any(word in lower for word in ("眨", "眨眼")):
-            result = self.action("blink")
-            return "眨。" if result.get("ok") else "想眨眼，但没连上灯。"
-        if any(word in lower for word in ("恢复", "自己", "自动", "不用管")):
-            result = self.action("release")
-            return "好，我自己来。" if result.get("ok") else "没连上灯。"
-        return "我现在还没接上 DeepSeek 的 key，只会几个固定动作：困了、好奇、眨眼、恢复、状态。"
+    def _remember(self, role: str, text: str) -> None:
+        self.history.append({"role": role, "text": text, "at": int(time.time())})
+        self.history = self.history[-40:]
+        try:
+            tmp = Path(str(self.history_path) + ".tmp")
+            tmp.write_text(json.dumps(self.history, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            tmp.replace(self.history_path)
+        except OSError:
+            pass
 
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -848,8 +527,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
-    parser.add_argument("--model", default=os.environ.get("DEEPSEEK_MODEL", "deepseek-flash"))
-    parser.add_argument("--no-llm", action="store_true", help="use the fixed intents only")
     parser.add_argument("--open", action="store_true", help="open the page in the browser")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -860,16 +537,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         datefmt="%H:%M:%S",
     )
     load_env()
-    engine = ChatEngine(args.socket, args.model, force_offline=args.no_llm)
+    engine = ChatEngine(args.socket)
     server = WebServer((args.host, args.port), engine)
     url = f"http://{args.host}:{args.port}"
 
     print(f"webchat: {url}")
     print(f"lamp socket: {args.socket}")
-    print(
-        "DeepSeek: "
-        + ("ready" if engine.llm_ready else "no key · fixed intents (困了/好奇/眨眼/恢复/状态)")
-    )
+    print("agent: the one in ambient_host.py (this page owns no model)")
     print("Ctrl+C to stop. The lamp keeps running if you close this page.")
 
     if args.open:

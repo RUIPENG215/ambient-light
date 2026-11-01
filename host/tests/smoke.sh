@@ -45,17 +45,17 @@ python3 ambient_host.py \
   }
 
 sleep 0.5
-RX=$(grep -o 'rx_l=[0-9]*' "$ERR" | tail -1 | cut -d= -f2)
-if [ -z "${RX:-}" ] || [ "$RX" -lt 10 ]; then
-  echo "FAIL: simulator received ${RX:-0} level lines"
+RX=$(grep -o 'rx_f=[0-9]*' "$ERR" | tail -1 | cut -d= -f2)
+if [ -z "${RX:-}" ] || [ "$RX" -lt 30 ]; then
+  echo "FAIL: simulator received ${RX:-0} look frames"
   tail -20 "$ERR"
   exit 1
 fi
 
-if ! grep -q 'mood ->' "$HOST_LOG"; then
-  echo "FAIL: host never emitted a mood command"
+if ! grep -q 'reflex on' "$HOST_LOG"; then
+  echo "FAIL: the reflex layer did not start"
   tail -20 "$HOST_LOG"
   exit 1
 fi
 
-echo "PASS: smoke test ($RX level lines reached the lamp simulator)"
+echo "PASS: smoke test ($RX look frames reached the lamp simulator)"

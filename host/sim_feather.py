@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     hue, speed, bright, louver = 150, 90, 180, 30
     rx_lines = 0
     rx_l = 0
+    rx_f = 0
     buf = b""
     started = time.monotonic()
     next_report = 0.0
@@ -75,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
                     parts = line.split(",")
                     if parts[0] == "L" and len(parts) >= 2:
                         rx_l += 1
+                    elif line.startswith("F,"):
+                        rx_f += 1
                         try:
                             level = max(0, min(100, int(parts[1])))
                         except ValueError:
@@ -117,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 next_tick = now + 2.0
                 if not args.quiet:
                     print(
-                        f"[sim] STAT rx_l={rx_l} rx_lines={rx_lines} "
+                        f"[sim] STAT rx_f={rx_f} rx_l={rx_l} rx_lines={rx_lines} "
                         f"level={level} mood={mood}",
                         file=sys.stderr,
                         flush=True,
@@ -126,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         print(
-            f"[sim] STAT rx_l={rx_l} rx_lines={rx_lines} level={level} mood={mood}",
+            f"[sim] STAT rx_f={rx_f} rx_l={rx_l} rx_lines={rx_lines} level={level} mood={mood}",
             file=sys.stderr,
             flush=True,
         )

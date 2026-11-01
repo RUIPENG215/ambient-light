@@ -18,16 +18,12 @@ from lampctl import send  # noqa: E402
 
 class FakeLink:
     def __init__(self) -> None:
-        self.sent: list = []
-        self.sensors = Sensors(prox=12, lux=18.0, energy=3, mood="calm", lid=70)
+        self.lines: list[str] = []
+        self.sensors = Sensors(prox=12, lux=18.0, energy=3, mood="host", lid=70)
         self.events: list = []
 
-    def send_mood(self, decision) -> bool:
-        self.sent.append(decision.serial_line())
-        return True
-
-    def send_lid(self, *args) -> bool:
-        self.sent.append(("LID",) + args)
+    def send_line(self, line: str) -> bool:
+        self.lines.append(line)
         return True
 
     def recent_events(self, window_s: float = 60.0):
@@ -39,14 +35,8 @@ class FakeSensors:
         self.link = link
 
     def mac_context(self) -> dict:
-        return {
-            "idle_s": 5,
-            "user_present": True,
-            "playing": False,
-            "title": "",
-            "artist": "",
-            "source": "",
-        }
+        return {"idle_s": 5, "user_present": True, "playing": False,
+                "title": "", "artist": "", "source": ""}
 
     def music_bus(self):
         return 0, 0, True
@@ -60,8 +50,13 @@ class TestControlServer(unittest.TestCase):
         self.sensors = FakeSensors(self.link)
         self.store = StateStore(str(Path(self.tmp.name) / "state.json"))
         self.state = LampState()
+        self.said: list[str] = []
         self.server = ControlServer(
-            self.link, self.state, self.store, self.sensors, self.socket_path
+            self.link, self.state, self.store, self.sensors, self.socket_path,
+            senses=lambda: {"level": 12.0, "music": 3, "beat": 0,
+                            "prox": 12, "lux": 18.0, "present": True, "idle_s": 5},
+            say=lambda text: (self.said.append(text) or
+                              {"ok": True, "reply": "嗯。", "actions": []}),
         )
         self.server.start()
 
@@ -74,82 +69,55 @@ class TestControlServer(unittest.TestCase):
         data = send({"cmd": "observe"}, self.socket_path)
         self.assertTrue(data["ok"])
         self.assertEqual(data["sensors"]["prox"], 12)
-        self.assertEqual(data["lamp"]["lid"], 70)
+        self.assertEqual(data["senses"]["level"], 12.0)
+        self.assertIn("light", data["lamp"])
 
-    def test_mood_takes_a_lease(self):
-        response = send(
-            {
-                "cmd": "mood",
-                "mood": "curious",
-                "hue": 150,
-                "speed": 90,
-                "bright": 180,
-                "lid": 85,
-                "seconds": 30,
-            },
-            self.socket_path,
-        )
+    def test_light_writes_numbers_and_streams(self):
+        response = send({"cmd": "light", "val": 90, "hue": 24}, self.socket_path)
         self.assertTrue(response["ok"])
-        self.assertEqual(response["line"], "M,curious,150,90,180,85")
-        self.assertEqual(self.state.mood, "curious")
-        self.assertEqual(self.state.lid, 85)
-        self.assertGreater(self.state.manual_until, time.monotonic())
+        self.assertEqual(response["changed"], ["hue", "val"])
 
-        data = send({"cmd": "observe"}, self.socket_path)
-        self.assertEqual(data["lamp"]["mood"], "curious")
-        self.assertEqual(data["lamp"]["lid"], 85)
+        time.sleep(0.25)
+        frames = [line for line in self.link.lines if line.startswith("F,")]
+        self.assertGreater(len(frames), 3)
+        last = frames[-1].split(",")
+        self.assertEqual(last[1], "24")
+        self.assertEqual(last[3], "90")
+        self.assertEqual(self.state.base_look.val, 90)
 
-    def test_lid_sends_mood_then_lid(self):
-        response = send(
-            {"cmd": "lid", "open": 20, "ms": 1500, "mode": "hold", "seconds": 10},
-            self.socket_path,
-        )
+    def test_light_keeps_fields_it_was_not_given(self):
+        send({"cmd": "light", "val": 90}, self.socket_path)
+        response = send({"cmd": "light", "hue": 200}, self.socket_path)
+        self.assertEqual(response["params"]["val"], 90)
+        self.assertEqual(response["params"]["hue"], 200)
+
+    def test_starting_the_stream_sends_the_render_config(self):
+        send({"cmd": "light", "val": 100}, self.socket_path)
+        time.sleep(0.2)
+        self.assertIn("G,80,0,1", self.link.lines)
+
+    def test_blink_is_a_transient(self):
+        response = send({"cmd": "blink", "kind": "wince"}, self.socket_path)
         self.assertTrue(response["ok"])
-        self.assertEqual(self.link.sent[0], "M,calm,150,90,180,20")
-        self.assertEqual(self.link.sent[1][0], "LID")
-        self.assertEqual(self.link.sent[1][1], 20)
-        self.assertEqual(self.state.lid, 20)
+        self.assertEqual(response["line"], "K,1")
+        self.assertIn("K,1", self.link.lines)
 
-    def test_release_clears_lease(self):
-        send({"cmd": "mood", "mood": "alert", "seconds": 60}, self.socket_path)
-        self.assertGreater(self.state.manual_until, 0)
-        send({"cmd": "release"}, self.socket_path)
-        self.assertEqual(self.state.manual_until, 0.0)
-        self.assertIsNone(self.state.manual_last)
+    def test_say_reaches_the_agent(self):
+        response = send({"cmd": "say", "text": "暗一点"}, self.socket_path)
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["reply"], "嗯。")
+        self.assertEqual(self.said, ["暗一点"])
 
-    def test_bad_mood_is_an_error_not_a_crash(self):
-        response = send({"cmd": "mood", "mood": "angry"}, self.socket_path)
+    def test_say_without_text_is_an_error(self):
+        response = send({"cmd": "say", "text": "  "}, self.socket_path)
         self.assertFalse(response["ok"])
-        self.assertIn("unknown mood", response["error"])
+        self.assertIn("say needs", response["error"])
+
+    def test_unknown_command_is_an_error_not_a_crash(self):
+        response = send({"cmd": "mood", "mood": "calm"}, self.socket_path)
+        self.assertFalse(response["ok"])
+        self.assertIn("unknown command", response["error"])
         self.assertTrue(send({"cmd": "ping"}, self.socket_path)["pong"])
-
-    def test_flow_cycles_hue_until_release(self):
-        response = send(
-            {
-                "cmd": "flow",
-                "seconds": 1,
-                "speed": 10,
-                "bright": 150,
-                "lid": 80,
-                "hue": 0,
-                "hue_step": 20,
-                "interval_ms": 50,
-            },
-            self.socket_path,
-        )
-        self.assertTrue(response["ok"])
-        time.sleep(0.3)
-        send({"cmd": "release"}, self.socket_path)
-
-        lines = [
-            line
-            for line in self.link.sent
-            if isinstance(line, str) and line.startswith("M,calm,")
-        ]
-        self.assertGreaterEqual(len(lines), 2)
-        hues = {int(line.split(",")[2]) for line in lines}
-        self.assertGreater(len(hues), 1)
-        self.assertEqual(self.state.manual_until, 0.0)
 
 
 if __name__ == "__main__":

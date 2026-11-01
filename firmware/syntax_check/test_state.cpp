@@ -104,6 +104,8 @@ int main() {
   check(t.size() == 8, "telemetry has 8 fields");
   check(t.size() > 5 && t[5] == "fallback", "no host -> origin is fallback");
   check(origin == ORIGIN_FALLBACK, "no host -> fallback owns the look");
+  check(renderOut[0] >= 5,
+        "fallback is a visible glow, not a near-black flicker");
   clearOut();
 
   // ---------------- startle reflex ----------------
@@ -213,6 +215,30 @@ int main() {
   stepFor(120);
   check(gDither, "G turns dithering back on");
   check(renderOut[0] <= gCap, "dithering never exceeds the cap");
+
+  // A 1-LSB toggle on a nearly dark channel is a 100% brightness jump, which
+  // reads as flicker. It must stay quantised down there.
+  feed("G,60,0,1\n");
+  feed("F,30,200,16,0,0,0,0,0,0,100,0\n");
+  stepFor(200);
+  int dimA = renderOut[0];
+  stepFor(20);
+  int dimB = renderOut[0];
+  stepFor(20);
+  int dimC = renderOut[0];
+  check(dimA == dimB && dimB == dimC,
+        "dither is gated off where one step is a doubling");
+
+  // ... and it must still smooth things where one step is small.
+  feed("F,30,200,220,0,0,0,0,0,0,100,0\n");
+  stepFor(200);
+  int first = renderOut[0];
+  bool varies = false;
+  for (int i = 0; i < 8; i++) {
+    stepFor(20);
+    if (renderOut[0] != first) varies = true;
+  }
+  check(varies, "dither still smooths the mid range");
   clearOut();
 
   // ---------------- M preset shorthand ----------------

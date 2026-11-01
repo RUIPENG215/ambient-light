@@ -1,19 +1,21 @@
 """Local control socket for the running lamp host.
 
-The host owns the serial port. Other processes (DSH's bash tool, `lampctl.py`,
-a chat agent) talk to it over a Unix socket with newline-delimited JSON.
+The host owns the serial port and the one agent. Other processes (`lampctl.py`,
+`webchat.py`, DSH's bash tool) talk to it over a Unix socket with
+newline-delimited JSON.
 
 Request:
-    {"cmd": "mood", "mood": "curious", "hue": 150, "lid": 85, "seconds": 60}
-    {"cmd": "lid", "open": 20, "ms": 2000, "mode": "hold"}
+    {"cmd": "light", "val": 90, "ease": 2500}
+    {"cmd": "blink", "kind": "blink"}
+    {"cmd": "say", "text": "暗一点"}
     {"cmd": "observe"}
-    {"cmd": "release"}
+    {"cmd": "ping"}
 
 Response: one JSON object, always with "ok".
 
-A mood/lid command also takes a short "mind lease": for N seconds the host's
-own slow loop stops writing moods, so the chat agent and the local policy do
-not fight over the lamp. `release` ends it immediately.
+There are no leases any more. The agent owns the light; `light` writes the same
+numbers the agent writes, which is what a debug tool or the web page does — it
+does not fight a second mind, because there is no second mind.
 """
 
 from __future__ import annotations
@@ -25,13 +27,13 @@ import socket
 import socketserver
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from brain import Decision
+from looks import FIELD_ORDER, LookEngine
 
 DEFAULT_SOCKET = os.environ.get("AMBIENT_SOCK", "/tmp/ambient-lamp.sock")
-MODE_IDS = {"hold": 0, "breathe": 1, "blink": 2, "wince": 3}
 
 
 class ControlError(Exception):
@@ -75,6 +77,13 @@ class ControlServer:
         sensors,
         socket_path: str = DEFAULT_SOCKET,
         logger: Optional[logging.Logger] = None,
+        look_hz: float = 25.0,
+        look_cap: int = 80,
+        look_gamma: int = 0,
+        look_dither: int = 1,
+        reflex=None,
+        senses=None,
+        say=None,
     ) -> None:
         self.link = link
         self.state = state
@@ -82,11 +91,21 @@ class ControlServer:
         self.sensors = sensors
         self.socket_path = str(socket_path)
         self.log = logger or logging.getLogger("control")
+        self.senses = senses
+        self.say_fn = say
         self._server: Optional[_ControlServer] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self._flow_stop = threading.Event()
-        self._flow_thread: Optional[threading.Thread] = None
+        self.engine = LookEngine(
+            link,
+            hz=look_hz,
+            cap=look_cap,
+            gamma=look_gamma,
+            dither=look_dither,
+            logger=self.log,
+            reflex=reflex,
+            senses=senses,
+        )
 
     # ---------------- lifecycle ----------------
     def start(self) -> None:
@@ -112,7 +131,7 @@ class ControlServer:
         self.log.info("control socket ready: %s", path)
 
     def stop(self) -> None:
-        self.stop_flow()
+        self.engine.stop()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -142,217 +161,107 @@ class ControlServer:
             return {"ok": True, "pong": True, "pid": os.getpid()}
         if cmd == "observe":
             return {"ok": True, **self.observe()}
-        if cmd == "mood":
-            return self.set_mood(request)
-        if cmd == "lid":
-            return self.set_lid(request)
-        if cmd == "flow":
-            return self.start_flow(request)
-        if cmd == "release":
-            return self.release()
+        if cmd == "light":
+            return self.set_light(request)
+        if cmd == "blink":
+            return self.blink(request)
+        if cmd == "say":
+            return self.say(request)
         raise ControlError(f"unknown command {cmd!r}")
 
     # ---------------- commands ----------------
-    def set_mood(self, request: dict) -> dict:
-        self.stop_flow()
-        seconds = max(0, min(600, int(request.get("seconds", 60))))
-        decision = Decision(
-            str(request.get("mood", "calm")),
-            int(request.get("hue", 150)),
-            int(request.get("speed", 90)),
-            int(request.get("lid", 70)),
-            int(request.get("bright", 180)),
-            str(request.get("reason", "chat")),
-            45,
-            "chat",
-        )
-        with self._lock:
-            ok = self.link.send_mood(decision)
-            now = time.monotonic()
-            if decision.mood != getattr(self.state, "mood", ""):
-                try:
-                    self.state.history.append(
-                        f"{self.state.mood} {int(now - self.state.mood_since)}s"
-                    )
-                except AttributeError:
-                    pass
-                self.state.mood = decision.mood
-                self.state.mood_since = now
-            self.state.lid = decision.louver
-            self.state.last = decision
-            self.state.last_sent = decision.serial_line()
-            self.state.last_sent_at = now
-            self.state.last_decision_at = now
-            self.state.manual_until = now + seconds
-            self.state.manual_last = decision
-            self.state.manual_sent_at = now
-            self.store.last_mood = decision.mood
-            self.store.save()
-        return {
-            "ok": ok,
-            "line": decision.serial_line(),
-            "mood": decision.mood,
-            "lid": decision.louver,
-            "manual_for_s": seconds,
+    def set_light(self, request: dict) -> dict:
+        """Write a few of the 11 numbers; the rest keep their value."""
+        clean = {
+            key: float(request[key])
+            for key in FIELD_ORDER
+            if key in request and request[key] is not None
         }
-
-    def set_lid(self, request: dict) -> dict:
-        self.stop_flow()
-        seconds = max(0, min(600, int(request.get("seconds", 60))))
-        open_pct = max(0, min(100, int(request.get("open", 70))))
-        ms = max(0, min(60000, int(request.get("ms", 800))))
-        mode = str(request.get("mode", "hold")).lower()
-        mode_id = MODE_IDS.get(mode, 0)
-        amp = float(request.get("amp", 4.0))
-        period = float(request.get("period", 6.0))
-
-        with self._lock:
-            base = self._base_decision(open_pct)
-            # Establish host mode first, then the eyelid command. The M line
-            # carries the same lid, so a later keep-alive cannot reopen it.
-            ok_m = self.link.send_mood(base)
-            ok_l = self.link.send_lid(open_pct, ms, mode_id, amp, period)
-            now = time.monotonic()
-            self.state.lid = open_pct
-            self.state.last = base
-            self.state.last_sent = base.serial_line()
-            self.state.last_sent_at = now
-            self.state.last_decision_at = now
-            self.state.manual_until = now + seconds
-            self.state.manual_last = base
-            self.state.manual_sent_at = now
-            self.store.save()
-        return {
-            "ok": bool(ok_m and ok_l),
-            "line": base.serial_line(),
-            "lid": open_pct,
-            "mode": mode,
-            "manual_for_s": seconds,
-        }
-
-    def _base_decision(self, lid: int) -> Decision:
-        base = getattr(self.state, "manual_last", None) or getattr(self.state, "last", None)
+        base = getattr(self.state, "base_look", None) or self.engine._look
         if base is None:
-            return Decision("calm", 150, 90, lid, 180, "chat lid", 45, "chat")
-        return Decision(
-            base.mood,
-            base.hue,
-            base.speed,
-            lid,
-            base.brightness,
-            "chat lid",
-            45,
-            "chat",
-        )
-
-    def start_flow(self, request: dict) -> dict:
-        """Slow calm breathing with a slowly cycling hue (a host-side loop)."""
-        self.stop_flow()
-        seconds = max(1, min(600, int(request.get("seconds", 30))))
-        speed = max(0, min(255, int(request.get("speed", 10))))
-        bright = max(0, min(255, int(request.get("bright", 150))))
-        lid = max(0, min(100, int(request.get("lid", 80))))
-        hue = int(request.get("hue", 150)) % 256
-        step = max(1, min(32, int(request.get("hue_step", 3))))
-        interval = max(0.05, min(2.0, float(request.get("interval_ms", 300)) / 1000.0))
+            raise ControlError("no base look yet")
+        look = replace(base, **clean) if clean else base
 
         with self._lock:
-            now = time.monotonic()
-            if self.state.mood != "calm":
-                self.state.history.append(f"{self.state.mood} {int(now - self.state.mood_since)}s")
-                self.state.mood = "calm"
-                self.state.mood_since = now
-            self.state.lid = lid
-            self.state.manual_until = now + seconds
-            self.store.last_mood = "calm"
+            self.state.base_look = look
+            self.state.light_reason = str(request.get("reason", "control light"))[:120]
+            if self.engine.running:
+                self.engine.set("control", look)
+            else:
+                self.engine.start("control", look)
+            self.state.last_sent = look.line()
+            self.state.last_sent_at = time.monotonic()
             self.store.save()
 
-        stop = threading.Event()
-        self._flow_stop = stop
+        return {"ok": True, "line": look.line(), "params": look.fields(),
+                "changed": sorted(clean)}
 
-        def run() -> None:
-            current = hue
-            end = time.monotonic() + seconds
-            while not stop.is_set() and time.monotonic() < end:
-                decision = Decision(
-                    "calm", current, speed, lid, bright, "flow", 45, "chat"
-                )
-                with self._lock:
-                    ok = self.link.send_mood(decision)
-                    tick = time.monotonic()
-                    self.state.lid = lid
-                    self.state.last = decision
-                    self.state.last_sent = decision.serial_line()
-                    self.state.last_sent_at = tick
-                    self.state.last_decision_at = tick
-                    self.state.manual_until = tick + max(3.0, min(30.0, float(seconds)))
-                    self.state.manual_last = decision
-                    self.state.manual_sent_at = tick
-                if not ok:
-                    break
-                current = (current + step) % 256
-                stop.wait(interval)
-            with self._lock:
-                self.state.manual_until = time.monotonic() + 3.0
+    def blink(self, request: dict) -> dict:
+        kind = str(request.get("kind", "blink")).lower()
+        cmd = "K,1" if kind == "wince" else "K,0"
+        try:
+            ok = bool(self.link.send_line(cmd))
+        except Exception:  # noqa: BLE001
+            ok = False
+        return {"ok": ok, "line": cmd}
 
-        self._flow_thread = threading.Thread(target=run, name="flow", daemon=True)
-        self._flow_thread.start()
-        return {
-            "ok": True,
-            "flow": True,
-            "seconds": seconds,
-            "speed": speed,
-            "bright": bright,
-            "lid": lid,
-            "hue_step": step,
-            "interval_ms": int(interval * 1000),
-        }
-
-    def stop_flow(self) -> None:
-        stop = self._flow_stop
-        if stop is not None:
-            stop.set()
-        thread = self._flow_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
-        self._flow_thread = None
-
-    def release(self) -> dict:
-        self.stop_flow()
-        with self._lock:
-            self.state.manual_until = 0.0
-            self.state.manual_last = None
-        return {"ok": True, "released": True}
+    def say(self, request: dict) -> dict:
+        text = str(request.get("text") or request.get("message") or "").strip()
+        if not text:
+            raise ControlError("say needs some text")
+        if self.say_fn is None:
+            return {"ok": False, "error": "no agent attached"}
+        return self.say_fn(text)
 
     # ---------------- read ----------------
+    def _senses(self) -> Optional[dict]:
+        try:
+            if callable(self.senses):
+                from reflex import as_senses
+
+                snap = as_senses(self.senses())
+                return {
+                    "level": round(snap.level, 1),
+                    "music": snap.music,
+                    "beat": snap.beat,
+                    "prox": snap.prox,
+                    "lux": round(snap.lux, 1),
+                    "idle_s": int(snap.idle_s),
+                }
+        except Exception:  # noqa: BLE001 - observe must never fail
+            pass
+        return None
+
     def observe(self) -> dict:
-        now = time.monotonic()
         raw = self.sensors.link.sensors
         mac = self.sensors.mac_context()
         music = self.sensors.music_bus()
-        manual_for = max(0.0, float(getattr(self.state, "manual_until", 0.0)) - now)
-        events = [
-            {"name": ev.name, "detail": ev.detail, "ago_s": int(now - ev.at)}
-            for ev in self.sensors.link.recent_events(60.0)
-        ]
+        look = self.engine.status()
+        light = look.get("params") or {}
         return {
             "lamp": {
-                "mood": self.state.mood,
-                "lid": self.state.lid,
-                "since_s": int(now - self.state.mood_since),
-                "manual_for_s": int(manual_for),
-                "last_line": self.state.last_sent,
+                "light": light,
+                "reason": getattr(self.state, "light_reason", ""),
+                "stream": look["name"] if look["running"] else "",
+                "frames": look["frames"],
+                "hz": look["hz"],
+                "line": look["line"],
             },
             "sensors": {
                 "prox": int(raw.prox),
                 "lux": round(float(raw.lux)),
                 "energy": int(raw.energy),
-                "mood": raw.mood,
-                "lid": int(raw.lid),
+                "origin": raw.mood,
+                "open": int(raw.lid),
             },
+            "senses": self._senses(),
+            "reflex": look.get("reflex"),
             "mac": mac,
             "music": {"energy": music[0], "beat": music[1], "user_present": music[2]},
             "drives": {k: round(float(v), 2) for k, v in self.store.drives.items()},
             "memory": list(self.store.memory)[-6:],
-            "events": events[-6:],
+            "events": [
+                {"name": ev.name, "detail": ev.detail, "ago_s": int(time.monotonic() - ev.at)}
+                for ev in self.sensors.link.recent_events(60.0)
+            ][-6:],
         }

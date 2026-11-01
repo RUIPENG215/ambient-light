@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Talk to a running ambient_host.py over its Unix control socket.
 
-Examples:
     python3 lampctl.py observe
-    python3 lampctl.py mood curious --hue 150 --lid 85 --seconds 120
-    python3 lampctl.py lid 20 --ms 2000
-    python3 lampctl.py release
+    python3 lampctl.py light --val 90 --ease 2500
+    python3 lampctl.py light --grad 30 --wave-amp 40 --wave-hz 14
+    python3 lampctl.py say "暗一点，慢一点"
+    python3 lampctl.py blink
 
 The socket path defaults to $AMBIENT_SOCK or /tmp/ambient-lamp.sock.
 """
@@ -20,11 +20,12 @@ import sys
 from typing import Any
 
 DEFAULT_SOCKET = os.environ.get("AMBIENT_SOCK", "/tmp/ambient-lamp.sock")
-MOODS = ("calm", "alert", "curious", "sleepy")
-MODES = ("hold", "breathe", "blink", "wince")
+
+LIGHT_FIELDS = ("hue", "sat", "val", "grad", "wave_n", "wave_amp", "wave_hz",
+                "breath_hz", "breath_amp", "open", "ease")
 
 
-def send(request: dict[str, Any], path: str, timeout: float = 5.0) -> dict:
+def send(request: dict[str, Any], path: str, timeout: float = 20.0) -> dict:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
         sock.connect(path)
@@ -42,34 +43,42 @@ def send(request: dict[str, Any], path: str, timeout: float = 5.0) -> dict:
 
 def print_observe(data: dict) -> None:
     lamp = data.get("lamp", {})
+    light = lamp.get("light") or {}
+    if light:
+        print("light   " + " ".join(f"{k}={light[k]}" for k in LIGHT_FIELDS if k in light))
+    print(
+        f"stream  {lamp.get('stream') or 'off':<8} {lamp.get('frames', 0)} frames "
+        f"@ {lamp.get('hz', 0)} Hz"
+        + (f"  ({lamp['reason']})" if lamp.get("reason") else "")
+    )
     sensors = data.get("sensors", {})
+    print(
+        f"sensors prox={sensors.get('prox', 0):3d} lux={sensors.get('lux', 0):5.1f} "
+        f"open={sensors.get('open', 0):3d} fw={sensors.get('origin', '?')}"
+    )
+    senses = data.get("senses") or {}
+    if senses:
+        print(
+            f"senses  level={senses.get('level', 0):5.1f} music={senses.get('music', 0):3d} "
+            f"beat={senses.get('beat', 0):3d} prox={senses.get('prox', 0):3d} "
+            f"lux={senses.get('lux', 0):5.1f} idle={senses.get('idle_s', 0)}s"
+        )
+    reflex = data.get("reflex") or {}
+    if reflex:
+        print(
+            f"reflex  beat={reflex.get('beat_env')} prox={reflex.get('prox_env')} "
+            f"lux={reflex.get('lux_env')} startles={reflex.get('startles')}"
+        )
     mac = data.get("mac", {})
-    music = data.get("music", {})
-    drives = data.get("drives", {})
-    print(
-        f"lamp    mood={lamp.get('mood', '?'):<8} lid={lamp.get('lid', 0):3d} "
-        f"since={lamp.get('since_s', 0)}s manual={lamp.get('manual_for_s', 0)}s"
-    )
-    print(
-        f"sensors prox={sensors.get('prox', 0):3d} lux={sensors.get('lux', 0):4d} "
-        f"energy={sensors.get('energy', 0):3d} fw_mood={sensors.get('mood', '?')} "
-        f"fw_lid={sensors.get('lid', 0)}"
-    )
     print(
         f"mac     idle={mac.get('idle_s', 0)}s present={mac.get('user_present')} "
         f"playing={mac.get('playing')} title={mac.get('title', '')!r}"
     )
-    print(f"music   energy={music.get('energy', 0)} beat={music.get('beat', 0)}")
-    print(
-        "drives  " + " ".join(f"{key}={value}" for key, value in drives.items())
-    )
+    drives = data.get("drives", {})
+    if drives:
+        print("drives  " + " ".join(f"{k}={v}" for k, v in drives.items()))
     for entry in data.get("memory", [])[-3:]:
         print(f"memory  {entry.get('t', '')}  {entry.get('text', '')}")
-    for event in data.get("events", [])[-4:]:
-        print(
-            f"event   {event.get('name', '')} {event.get('ago_s', 0)}s ago"
-            f" {event.get('detail', '')}".rstrip()
-        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,87 +87,42 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="print the raw response")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("observe", help="read lamp state, sensors and macOS context")
+    sub.add_parser("observe", help="read the light, the sensors and the reflex")
     sub.add_parser("ping", help="check that the host control socket is alive")
 
-    mood = sub.add_parser("mood", help="set mood and take a short mind lease")
-    mood.add_argument("mood", choices=MOODS)
-    mood.add_argument("--hue", type=int, default=150)
-    mood.add_argument("--speed", type=int, default=90)
-    mood.add_argument("--bright", type=int, default=180)
-    mood.add_argument("--lid", type=int, default=70)
-    mood.add_argument("--reason", default="chat")
-    mood.add_argument("--seconds", type=int, default=60)
+    light = sub.add_parser("light", help="write a few light numbers, keep the rest")
+    for _name in LIGHT_FIELDS:
+        light.add_argument(f"--{_name.replace('_', '-')}", dest=_name, type=int, default=None)
+    light.add_argument("--reason", default="lampctl")
 
-    lid = sub.add_parser("lid", help="move the eyelid and take a short mind lease")
-    lid.add_argument("open", type=int)
-    lid.add_argument("--ms", type=int, default=800)
-    lid.add_argument("--mode", choices=MODES, default="hold")
-    lid.add_argument("--amp", type=float, default=4.0)
-    lid.add_argument("--period", type=float, default=6.0)
-    lid.add_argument("--seconds", type=int, default=60)
+    blink = sub.add_parser("blink", help="a transient: blink or wince")
+    blink.add_argument("kind", nargs="?", choices=("blink", "wince"), default="blink")
 
-    flow = sub.add_parser(
-        "flow", help="slow calm breathing with slowly cycling colours"
-    )
-    flow.add_argument("--seconds", type=int, default=30)
-    flow.add_argument("--speed", type=int, default=10)
-    flow.add_argument("--bright", type=int, default=150)
-    flow.add_argument("--lid", type=int, default=80)
-    flow.add_argument("--hue", type=int, default=150)
-    flow.add_argument("--hue-step", type=int, default=3)
-    flow.add_argument("--interval-ms", type=int, default=300)
-
-    sub.add_parser("release", help="give control back to the host's own slow loop")
+    say = sub.add_parser("say", help="talk to the agent and get its answer")
+    say.add_argument("text", nargs="+")
 
     args = parser.parse_args(argv)
 
     if args.command == "observe":
-        request = {"cmd": "observe"}
+        request: dict[str, Any] = {"cmd": "observe"}
     elif args.command == "ping":
         request = {"cmd": "ping"}
-    elif args.command == "release":
-        request = {"cmd": "release"}
-    elif args.command == "flow":
-        request = {
-            "cmd": "flow",
-            "seconds": args.seconds,
-            "speed": args.speed,
-            "bright": args.bright,
-            "lid": args.lid,
-            "hue": args.hue,
-            "hue_step": args.hue_step,
-            "interval_ms": args.interval_ms,
-        }
-    elif args.command == "mood":
-        request = {
-            "cmd": "mood",
-            "mood": args.mood,
-            "hue": args.hue,
-            "speed": args.speed,
-            "bright": args.bright,
-            "lid": args.lid,
-            "reason": args.reason,
-            "seconds": args.seconds,
-        }
+    elif args.command == "blink":
+        request = {"cmd": "blink", "kind": args.kind}
+    elif args.command == "say":
+        request = {"cmd": "say", "text": " ".join(args.text)}
     else:
-        request = {
-            "cmd": "lid",
-            "open": args.open,
-            "ms": args.ms,
-            "mode": args.mode,
-            "amp": args.amp,
-            "period": args.period,
-            "seconds": args.seconds,
-        }
+        request = {"cmd": "light", "reason": args.reason}
+        for key in LIGHT_FIELDS:
+            value = getattr(args, key)
+            if value is not None:
+                request[key] = value
 
     try:
         response = send(request, args.socket)
     except FileNotFoundError:
-        print(
-            f"no control socket at {args.socket}; is ambient_host.py running?",
-            file=sys.stderr,
-        )
+        print(f"no control socket at {args.socket}; is ambient_host.py running?",
+              file=sys.stderr)
         return 2
     except (ConnectionRefusedError, socket.timeout, OSError) as exc:
         print(f"control socket error: {exc}", file=sys.stderr)
@@ -175,22 +139,16 @@ def main(argv: list[str] | None = None) -> int:
         print_observe(response)
     elif args.command == "ping":
         print(f"pong pid={response.get('pid', '?')}")
-    elif args.command == "release":
-        print("released; the host's own slow loop resumes")
-    elif args.command == "flow":
-        print(
-            f"flow: calm breathing, hue cycling every {response.get('interval_ms')} ms, "
-            f"for {response.get('seconds')} s"
-        )
-    elif args.command == "mood":
-        print(
-            f"ok {response.get('line', '')}  (manual for {response.get('manual_for_s', 0)}s)"
-        )
+    elif args.command == "blink":
+        print(f"ok {response.get('line')}")
+    elif args.command == "say":
+        print(response.get("reply", ""))
+        actions = response.get("actions") or []
+        if actions:
+            print(f"  ({', '.join(actions)})")
     else:
-        print(
-            f"ok lid={response.get('lid')} mode={response.get('mode')}  "
-            f"(manual for {response.get('manual_for_s', 0)}s)"
-        )
+        changed = ",".join(response.get("changed") or ["nothing"])
+        print(f"ok changed={changed}\n   {response.get('line')}")
     return 0
 
 
