@@ -1,136 +1,131 @@
-# Interactive Ambient Light v2.2
+# Interactive Ambient Light
 
-一盏有「AI agent 性格」的互动氛围灯：32 颗 NeoPixel 在硫酸纸罩里呼吸、受惊、
-好奇、困倦；电脑上的 DeepSeek 根据声音、接近、音乐和人的状态决定它「接下来
-怎么感觉」，固件负责 20 ms 级的反射和 50 fps 的动画。
+A paper ambient lamp with 32 NeoPixels that breathes, gets startled, notices you
+and gets sleepy. The interesting part is where the thinking happens: the lamp's
+body is firmware, its nervous system is a reflex layer on the computer, and its
+mind is a DeepSeek agent that is allowed to be offline.
 
-这一版只有两层：
+**Two layers, in this order:**
 
-> **反射在电脑（25 Hz，不需要网络），思考在一个 agent（可选）。**
+> The reflex lives on the computer (25 Hz, no network). The thinking is one
+> agent (optional).
 
 ```
-麦克风 / 音乐 / 接近 / 照度 / 空闲
+microphone / music / proximity / ambient light / idle time
         │
         ▼
-   reflex.py        把传感器变成数字：呼吸深浅、亮度、开合、偏暖、闪烁
-        │  25 Hz，串口 F 帧
+   reflex.py          sensors -> numbers: breath depth, brightness,
+        │             openness, warmth, a startle
+        │  25 Hz, "F" frames over USB
         ▼
-    固件 2.2        50 fps 画出来；断线时自己退回琥珀呼吸
-        ▲
-        │  同一个 agent 写的 11 个数字
-   agent.py         DeepSeek，约 25 秒一轮；你说话时立刻一轮并回你一句
+   firmware 2.2.0     50 fps; falls back to its own amber breathing if the
+        ▲             stream stops
+        │  the same eleven numbers
+   agent.py           DeepSeek, ~25 s per turn; one turn immediately when you
+                      type, and it answers in a sentence
 ```
 
-- **没有 agent 也活着**：没有 key、断网、或者 `--no-llm`，反射照跑，灯照样对声音
-  和靠近有反应。
-- **没有 host 也活着**：host 挂了，固件 1.5 秒后回到自己的琥珀呼吸。
-- **只有一个意识**：webchat 不调模型，它把你说的话转给 host 里那一个 agent。
+- **No agent, still alive.** No key, no network or `--no-llm`: the reflex keeps
+  running and the lamp keeps answering sound and hands.
+- **No host, still alive.** If the host dies the firmware eases into its own
+  amber breathing 1.5 s later.
+- **One mind.** The web page owns no model; it forwards what you type to the one
+  agent in the host.
 
-## 目录
+## Layout
 
-| 路径 | 内容 |
+| Path | What it is |
 |---|---|
-| [firmware/ambient_light/ambient_light.ino](firmware/ambient_light/ambient_light.ino) | 固件：F 帧渲染、瞬态、兜底 look、串口 |
-| [firmware/syntax_check/run_checks.sh](firmware/syntax_check/run_checks.sh) | 无 Arduino 工具链的语法 + 行为自检 |
-| [host/ambient_host.py](host/ambient_host.py) | 宿主主程序：快循环 / 音乐 / 光流 / agent |
-| [host/agent.py](host/agent.py) | 唯一的大脑：DeepSeek 工具调用、drives、记忆 |
-| [host/looks.py](host/looks.py) | `Look`（11 个数字）+ 25 Hz 参数流线程 |
-| [host/reflex.py](host/reflex.py) | 感知层：麦克风/节拍/接近/照度/空闲 → 光，不需要网络 |
-| [host/control.py](host/control.py) | 本机控制 socket（light / blink / say / observe） |
-| [host/lampctl.py](host/lampctl.py) | 命令行控灯、和它说话、读状态 |
-| [host/webchat.py](host/webchat.py) | 本地网页：状态 + 聊天（它自己不调模型） |
-| [host/sensors.py](host/sensors.py) | 麦克风节拍、BlackHole 音乐、macOS 上下文 |
-| [host/audio_meter.py](host/audio_meter.py) | 麦克风 → 校准 → 0–100 等级 |
-| [host/feather_link.py](host/feather_link.py) | 串口协议、遥测解析、断线重连 |
-| [host/sim_feather.py](host/sim_feather.py) | 假 Feather（pty），无硬件联调 |
-| [PROTOCOL.md](PROTOCOL.md) | 完整串口协议 v2.2 |
-| [FIRMWARE-API.md](FIRMWARE-API.md) | 固件 v2.2 的接口契约与实现记录 |
+| [firmware/ambient_light/ambient_light.ino](firmware/ambient_light/ambient_light.ino) | Firmware: F-frame renderer, transients, fallback look, serial |
+| [firmware/syntax_check/run_checks.sh](firmware/syntax_check/run_checks.sh) | Syntax and behaviour checks without the Arduino toolchain |
+| [host/ambient_host.py](host/ambient_host.py) | Host main: fast loop / music / light stream / agent |
+| [host/agent.py](host/agent.py) | The one mind: DeepSeek tools, drives, memory |
+| [host/looks.py](host/looks.py) | `Look` (eleven numbers) and the 25 Hz frame engine |
+| [host/reflex.py](host/reflex.py) | Sensor reflex layer — no network, never offline |
+| [host/control.py](host/control.py) | Local socket: `light` / `blink` / `say` / `observe` |
+| [host/lampctl.py](host/lampctl.py) | CLI: change the light, talk to it, read state |
+| [host/webchat.py](host/webchat.py) | Local page: status and chat (owns no model) |
+| [host/sensors.py](host/sensors.py) | Beat detection, BlackHole audio, macOS context |
+| [host/audio_meter.py](host/audio_meter.py) | Microphone → calibration → 0–100 level |
+| [host/feather_link.py](host/feather_link.py) | Serial protocol, telemetry, reconnect |
+| [host/sim_feather.py](host/sim_feather.py) | Fake Feather on a pty, for testing without hardware |
+| [PROTOCOL.md](PROTOCOL.md) | The serial protocol, v2.2 |
+| [FIRMWARE-API.md](FIRMWARE-API.md) | The firmware contract: frames, render math, timing |
 
----
+## Hardware
 
-## 硬件
+### The strip
 
-### 灯
-
-| 灯带 | 接到 |
+| Strip | Connect to |
 |---|---|
-| `5V` | 外部 5V / 2A 电源（**不要**从 Feather 的 5V 脚带 32 颗） |
-| `GND` | 外部电源 GND **和** Feather GND（共地） |
-| `DIN` | Feather `D6`，串 330 Ω |
-| `5V/GND` 之间 | 1000 µF 电解电容（靠近灯带） |
+| `5V` | External 5 V / 2 A supply (**do not** power 32 LEDs from the Feather) |
+| `GND` | External supply GND **and** Feather GND (common ground) |
+| `DIN` | Feather `D6`, through 330 Ω |
+| `5V`/`GND` | 1000 µF electrolytic near the strip |
 
-32 颗全白约 1.9 A。固件全局亮度锁在 40/255，实际约 0.3 A，USB 供电也能撑，
-但外接电源更稳。3.3 V 数据驱动 5 V 灯带处于临界，偶尔闪烁就加 74AHCT125。
+32 LEDs at full white draw about 1.9 A. The firmware caps the channel value
+(80/255 by default, about 0.6 A), so USB power survives, but an external supply
+is steadier. Driving 5 V data from 3.3 V is marginal — add a 74AHCT125 if you
+see flicker.
 
-### 灯罩
+### The shade
 
-- 10 cm 圆环 + 硫酸纸圆筒 + 底座；LED 环上方加一层乳白亚克力/两层纸做扩散，
-  否则纸罩上会看到 32 个亮点。
-- 开合度目前是**灯光调制**：`F` 的 `open` 映射成亮度（0 = 2%，100 = 100%），
-  blink/wince 是快速的亮度包络。纸罩上看起来就是「闭眼、眯眼、困得垂下」。
-- 以后加 SG90：把固件 `ENABLE_SERVO` 改成 1，同一套 `LID` 命令驱动舵机，
-  协议和宿主都不用改。
+- 10 cm ring, tracing-paper cylinder, base. Add a diffuser layer above the LEDs
+  (milk acrylic or two sheets of paper) or you will see 32 hot spots.
+- Openness is rendered as **brightness modulation** (`open` 0–100 maps to
+  0.02–1.0), so blinking and squinting work without mechanics.
+- An SG90 is reserved: set `ENABLE_SERVO 1` and the same `open` parameter drives
+  the servo. No protocol change.
 
-### 传感器
+### Sensors
 
-- APDS9960 板载 I2C，无需接线；启动时若出现 `E,SENSOR_FAIL`，检查是否 Sense 版。
-- ToF（VL53L0X，0x29）已买但**还没接进固件**；下一步加距离/接近事件，和
-  APDS 分工：APDS 管 lux/颜色，ToF 管距离。
-- 舵机预留 `D5`，默认关闭；接舵机时单独 5V 供电、共地。
+- APDS9960 is onboard (I2C, no wiring). If you see `E,SENSOR_FAIL` at boot,
+  check that the board is the Sense variant.
+- A VL53L0X (ToF) is bought but **not wired**.
+- Servo pin `D5`, disabled by default; give it its own 5 V supply.
 
----
+## Flash the firmware
 
-## 烧录固件
-
-1. Arduino IDE 安装 **Adafruit nRF52** 板卡包。
-2. 库管理器安装 **Adafruit NeoPixel**、**Adafruit APDS9960**。
-3. 板卡选 *Adafruit Feather nRF52840 Sense*，打开 `.ino` 上传。
-4. 串口监视器 115200，换行 **New Line**，可以手动试：
+1. Arduino IDE → install the **Adafruit nRF52** board package.
+2. Library manager → **Adafruit NeoPixel**, **Adafruit APDS9960**.
+3. Board → *Adafruit Feather nRF52840 Sense*, open the `.ino`, upload.
+4. Serial monitor at 115200, line ending **New Line**. You can type:
 
 ```
-T                         # 红绿蓝白自检（阻塞 1.2 s，别和 F 混用）
-P                         # 应回 PONG
-G,80,1,1                  # 亮度上限 80、gamma 2.2、抖动开
-F,150,220,180,20,2,30,40,10,40,80,600   # 青绿、缓呼吸、沿环有色相渐变
-K,0                       # 眨一下眼
-K,2,255                   # 闪白一下
-M,calm,150,80,180,70      # 旧写法：calm 预设，等同于一套 F 参数
-U,70,100,1                # 音乐能量/节拍（只调制）
-C,80,70,50,60             # 耦合增益
-R,55,120,1                # 受惊阈值/接近阈值/启用
+T                         # red/green/blue/white self-test (blocks 1.2 s)
+P                         # expect PONG
+G,80,1,1                  # channel ceiling 80, gamma 2.2, dither on
+F,150,220,180,20,2,30,40,10,40,80,600   # a look, as eleven numbers
+K,0                       # blink
+K,2,255                   # white flash
 ```
 
-桌面串口监视器只能手动发单帧，看不出连续效果；要真正驱动请用宿主（见下）。
-`F` 是 20–30 Hz 的流，手发一条只会看到它慢慢缓动过去。
+A desktop serial monitor cannot send a stream; the lamp will just ease toward
+whatever single frame you typed. Use the host for real driving.
 
-改动固件后先在电脑上跑自检（不需要板子）：
+After changing the firmware, run the checks on the computer (no board needed):
 
 ```bash
 cd firmware/syntax_check
 ./run_checks.sh
 ```
 
-它会做 `-Wall -Wextra` 语法检查，并用假时钟、假串口驱动 `setup()/loop()`，
-验证受惊、回落、45 秒入睡、靠近唤醒、链路超时、眼皮开合/眨眼、音乐脉冲、
-耦合、反射阈值、参数帧、gamma、兜底缓出（67 项）。
+It does a `-Wall -Wextra` syntax check and drives `setup()/loop()` with a fake
+clock and a fake serial port: startle, decay, fallback, frame timeout, dither,
+gamma, cap, transients, coupling disabled, 70 checks.
 
-### 烧完先手看一眼
-
-串口监视器里手发一条 `F` 只能看到它缓动过去，看不出「流」的感觉。起 host、
-用 `lampctl` 直接改数字：
+### After flashing, look at it by hand
 
 ```bash
 cd host && source .venv/bin/activate
-python3 ambient_host.py --port auto --span-db 30        # 另开一个终端
-python3 lampctl.py observe
+python3 ambient_host.py --port auto --span-db 30     # in one terminal
+python3 lampctl.py observe                           # in another
 python3 lampctl.py light --val 200 --grad 35 --wave-hz 20
-python3 lampctl.py light --val 90 --ease 3000           # 慢慢暗下去
+python3 lampctl.py light --val 90 --ease 3000        # glide down slowly
 python3 lampctl.py blink
 ```
 
----
-
-## 安装宿主
+## Install the host
 
 ```bash
 cd host
@@ -138,306 +133,275 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# 编辑 .env，填入 DEEPSEEK_API_KEY
-set -a; source .env; set +a
+# edit .env and put your DEEPSEEK_API_KEY in it
 ```
 
-`openai` 包用于访问 DeepSeek 的 OpenAI 兼容接口；没有 key 或没装包时会自动
-降级成本地规则策略并打警告。
+The `openai` package talks to DeepSeek's OpenAI-compatible endpoint. Without a
+key (or without the package) the agent is simply off and the lamp runs on
+reflexes.
 
-### 音乐（可选，推荐）
+### Music (optional, recommended)
 
 ```bash
 brew install blackhole-2ch
-sudo killall coreaudiod            # 如果设备里没出现
+sudo killall coreaudiod
 # Audio MIDI Setup → + → Create Multi-Output Device
-#   勾选「MacBook 扬声器」+「BlackHole 2ch」，采样率都设 48 kHz
-# 系统设置 → 声音 → 输出 → Multi-Output Device
-python3 ambient_host.py --list-devices   # 应能看到 BlackHole
+#   tick "MacBook Speakers" + "BlackHole 2ch", both at 48 kHz
+# System Settings → Sound → Output → Multi-Output Device
+python3 ambient_host.py --list-devices   # BlackHole should appear
 ```
 
-没有 BlackHole 也能跑：节拍会退化成从麦克风 dB 跳变检测，演示可用，但对
-音乐不如系统音频干净。
+Without BlackHole the beat falls back to the microphone, which works for
+clapping but cannot hear a kick drum a laptop speaker never reproduced.
 
-首次读取 Apple Music/Spotify 会弹一次 macOS 自动化权限，允许即可；不想授权就
-只用音乐能量，不看曲名。
+## Run it
 
----
-
-## 运行
-
-**一个命令起全部**（host + 网页，日志进 `host/logs/`）：
+**One command for everything** (host + page, logs in `host/logs/`):
 
 ```bash
 cd host
 ./lamp.sh start
 #   host      started (pid 12345)  agent: DeepSeek
-#   网页      http://127.0.0.1:8765
+#   page      http://127.0.0.1:8765
 
-./lamp.sh status              # 现在在跑什么、灯被喂了什么
-./lamp.sh logs                # 跟着看两边日志
-./lamp.sh say "暗一点"         # 不打开网页也能跟它说话
-./lamp.sh stop                # 两个一起停（包括不是它起的）
+./lamp.sh status     # what is running, and what the light is being fed
+./lamp.sh logs       # follow both logs
+./lamp.sh say "a little darker"
+./lamp.sh stop
 ```
 
-关掉终端不会停（`nohup`），用 `./lamp.sh stop`。
+Closing the terminal does not stop it (`nohup`); use `./lamp.sh stop`.
 
-手动起也可以：
+By hand:
 
 ```bash
 cd host
 source .venv/bin/activate
-set -a; source .env; set +a          # 有 key 才会有 agent
+set -a; source .env; set +a          # without this there is no agent
 python3 ambient_host.py --port auto --span-db 30
 ```
 
-启动日志会说明现在是哪一层在管灯：
+The first log line says which layer is in charge:
 
 ```
 reflex on | stream 25 Hz cap 80 | agent deepseek-flash | slow 3..10 s | port auto | span 30.0 dB
 ```
 
-状态栏每 10 秒一行：
+A status line every 10 s:
 
 ```
 22:57:23  lvl   8 ..........  -54.4 dBFS  hue= 30 val= 90 open= 55  prox=  0  lux=    0  mus=  5  link=up  stream=lamp  llm=3/60  812ms
 ```
 
-### 三种降级，都还能用
+### Three degradations, all still alive
 
-| 情况 | 你会看到 | 灯还是活的吗 |
+| Situation | Log says | Lamp |
 |---|---|---|
-| 有 key、有网 | `agent deepseek-flash` | 是：agent 写样子，反射做反应 |
-| 没 key / 断网 / `--no-llm` | `agent off` | 是：只有反射，灯照样呼吸、跟着声音和手 |
-| host 挂了 | 固件 1.5 s 后 `FRAME_LOST` | 是：固件退回自己的琥珀呼吸 |
+| Key and network | `agent deepseek-flash` | agent writes the look, reflex reacts |
+| No key / offline / `--no-llm` | `agent off` | reflex only: it still breathes, follows sound and hands |
+| Host died | firmware `FRAME_LOST` after 1.5 s | its own amber breathing |
 
 ```bash
-python3 ambient_host.py --port auto --no-llm      # 只要反射，不要大脑
+python3 ambient_host.py --port auto --no-llm      # reflexes only
 ```
 
-### 无硬件
+### Without hardware
 
 ```bash
 python3 sim_feather.py --pty
-# 输出 PTY=/dev/ttys012
+# PTY=/dev/ttys012
 python3 ambient_host.py --port /dev/ttys012 --no-llm --sim-audio
 ```
 
-### 完全干跑
+### Dry run
 
 ```bash
 python3 ambient_host.py --no-llm --sim-audio --dry-run --duration 10
 ```
 
-会把 `[dry] G,...`、`[dry] C,0,0,0,0`、`[dry] F,...`、`[dry] K,...` 打到终端。
+Prints `[dry] G,...`, `[dry] C,0,0,0,0`, `[dry] F,...`, `[dry] K,...`.
 
-### 常用参数
+### Options
 
-| 参数 | 默认 | 作用 |
+| Option | Default | Effect |
 |---|---|---|
-| `--no-llm` | 关 | 不要 agent，只跑反射 |
-| `--model` | `deepseek-flash` | DeepSeek 模型 |
-| `--api-base` | `https://api.deepseek.com` | OpenAI 兼容地址 |
-| `--llm-min-interval` | 25 | 两次自主决策的最小间隔（秒） |
-| `--llm-heartbeat` | 120 | 环境没变化时，至少多久想一次 |
-| `--max-calls-per-hour` | 60 | 硬上限，滑动窗口 |
-| `--llm-timeout` | 8 | 单次 API 超时（秒） |
-| `--look-hz` | 25 | 参数流频率 |
-| `--cap` | 80 | 通过 `G` 下发的通道上限（亮度） |
-| `--gamma` | 0 | 0 线性 / 1 = 2.2 / 2 = 2.8 |
-| `--no-reflex` | 关 | 关掉感知层（只放 agent 写的样子） |
-| `--span-db` | 18 | 比底噪高多少 dB 算 100（放音乐建议 30） |
-| `--calibrate` | 3 | 底噪校准秒数 |
-| `--sim-audio` | 关 | 合成音频，不需要麦克风权限 |
-| `--no-music` | 关 | 不开 BlackHole；节拍退回麦克风 |
-| `--dry-run` | 关 | 不写串口，只打印 |
-| `--state-file` | `state.json` | drives / 记忆持久化 |
-| `--control-socket` | `/tmp/ambient-lamp.sock` | 本机控制 socket |
-| `--list-devices` | — | 列出音频设备和串口 |
+| `--no-llm` | off | no agent, reflexes only |
+| `--model` | `deepseek-flash` | DeepSeek model |
+| `--api-base` | `https://api.deepseek.com` | OpenAI-compatible endpoint |
+| `--llm-min-interval` | 25 | minimum seconds between autonomous turns |
+| `--llm-heartbeat` | 120 | how often it thinks when nothing changes |
+| `--max-calls-per-hour` | 60 | hard sliding-window cap |
+| `--llm-timeout` | 8 | per-call timeout (s) |
+| `--look-hz` | 25 | parameter stream rate |
+| `--cap` | 80 | channel ceiling sent via `G` |
+| `--gamma` | 0 | 0 linear / 1 = 2.2 / 2 = 2.8 |
+| `--no-reflex` | off | disable the sensor reflex layer |
+| `--span-db` | 18 | dB over baseline that counts as 100 (use 30 for music) |
+| `--calibrate` | 3 | baseline calibration seconds |
+| `--sim-audio` | off | synthetic audio, no microphone permission |
+| `--no-music` | off | do not open BlackHole |
+| `--dry-run` | off | print serial lines instead of writing them |
+| `--state-file` | `state.json` | drives and memory |
+| `--control-socket` | `/tmp/ambient-lamp.sock` | local control socket |
+| `--list-devices` | — | list audio devices and serial ports |
 
----
+## Control it from another process
 
-## 从另一个进程控灯（lampctl / DSH）
-
-`ambient_host.py` 默认在 `/tmp/ambient-lamp.sock` 开一个本机 Unix socket。
-不用停 host，另开一个终端：
+The host opens a Unix socket at `/tmp/ambient-lamp.sock`. Leave the host running
+and use another terminal:
 
 ```bash
 cd host
-python3 lampctl.py observe                              # 灯现在被喂了什么
-python3 lampctl.py light --val 90 --ease 2500           # 只改一两个数字，其余不动
-python3 lampctl.py light --grad 30 --wave-amp 40 --wave-hz 14   # 让它流动起来
-python3 lampctl.py blink                                # 眨一下（瞬态，不改样子）
-python3 lampctl.py say "暗一点，慢一点"                  # 和那个 agent 说话
+python3 lampctl.py observe                              # what is being fed to the lamp
+python3 lampctl.py light --val 90 --ease 2500           # change one or two numbers
+python3 lampctl.py light --grad 30 --wave-amp 40 --wave-hz 14
+python3 lampctl.py blink
+python3 lampctl.py say "a little darker, slower"         # talk to the same agent
 ```
 
-`light` 写的就是 agent 写的那 11 个数字，所以它是**调试工具**，不是第二套控制
-逻辑：agent 下一轮看到 `lamp.light`，可以接着改。`say` 会走 host 里那**同一个**
-agent（所以要 host 有 key），最多等 25 秒。
+`light` writes the same eleven numbers the agent writes, so it is a **debug
+tool**, not a second control logic: the agent sees `lamp.light` on its next turn
+and can keep going from there. `--json` prints the raw response.
 
-- `--json` 输出原始 JSON，方便脚本解析。
-- 没有 host 在跑时会提示 `no control socket ...`。
+## The web page
 
-### 感知层：传感器直接改光，不经过 agent
-
-`host/reflex.py` 在 25 Hz 的帧循环里跑，把传感器的读数叠到当前 look 上。
-**它不联网、不调用模型**，所以就算 DeepSeek 挂了、断网了，灯照样会反应。
-
-| 传感器 | 它改什么 | 感觉上像 |
-|---|---|---|
-| 房间声音 / 系统音频 | 两者**取较大者**，一起驱动呼吸深度（安静 ~60%，大声 ~150%）和亮度 | 房间变吵、或者开始放音乐，呼吸都变深 |
-| 音乐节拍 | `val` 上一个 ~200 ms 的脉冲 | 跟着鼓点跳 |
-| 音乐能量 | 眼皮多睁开一点点，**并把光"铺开"**：色相跨度、空间波深度、波的流速都上去 | 有音乐时颜色开始在环上流动 |
-| 音乐节拍 | 除亮度外，眼皮也跟着鼓点抬一下 | 鼓点不只是变亮，还像被"顶"了一下 |
-| 接近（APDS） | `open` + 亮度 + 色相偏暖 | 手靠近时"看过来" |
-| 照度 | 亮度下限 | 房间亮时它更亮，夜里更暗 |
-| 空闲秒数 | 缓慢变暗（最多 35%） | 你走了它就困了 |
-| 电平突跳 | 发 `K,2,255` + `K,1` | 拍手：闪白 + 缩一下 |
-
-几条设计上的取舍：
-
-- **叠加，不接管**：反射只调制 agent 给的基底，不替换它。谁在控制这盏灯，
-  任何时候都只有一句话能说完。
-- **关掉板子的耦合**：反射层启动时会发 `C,0,0,0,0`，否则固件会再叠一次
-  音乐增益，变成双重调制。
-- **受惊要求"边缘"**：必须一帧内跳 10 个电平以上，慢慢变吵不会触发。
-- **音乐永远不会吓到它**：受惊只看麦克风，不看系统音频——重低音再猛也不会让它跳一下。
-- **房间和音乐取 max 而不是相加**：大声放音乐时麦克风也会听到，相加就重复计数了。
-- 自动变暗、照度这些参数在 `ReflexConfig` 里，改数字就行。
+A window, not a second brain. It forwards what you type to the one agent and
+shows the answer. Close the page and the lamp keeps running; restart it and the
+lamp's personality does not change.
 
 ```bash
-```bash
-python3 ambient_host.py --port auto --span-db 30     # 反射 + agent
-python3 ambient_host.py --port auto --no-reflex      # 只要 agent 写的样子，不感知
-```
-
-> 光流从启动那一刻就在跑（基底是那团琥珀），所以反射**永远**有东西可调制。
-> host 死了才会停，那时固件自己接手。
-
-## 本地 Web 聊天
-
-`webchat.py` 是一扇窗：左边是灯的状态，右边是和它聊天。**它自己没有任何模型**，
-只把你说的话通过控制 socket 转给 host 里那一个 agent，再把回答显示出来。关掉页面，
-灯继续跑；重启它也不会换一个性格。
-
-```bash
-cd host
-source .venv/bin/activate
+cd host && source .venv/bin/activate
 python3 webchat.py --port 8765 --open
 # http://127.0.0.1:8765
 ```
 
-- 聊天 = 调 host 的 `say`，所以 host 必须有 key 才会有回答；没有时会说
-  「我现在只有反射」
-- 四个按钮是**写参数**，不是切模式：暗一点 / 亮一点 / 流动一点 / 眨一下
-- 页面每 2 秒刷新状态；聊天记录存在 `webchat_history.json`
-- 只绑 `127.0.0.1`，没有登录；不要直接暴露到公网
+- chat = `say` on the host, so the host needs a key to answer; without one it
+  says "I only have reflexes right now"
+- the four buttons write parameters, they do not switch modes: dimmer /
+  brighter / more flow / blink
+- status refreshes every 2 s; history goes to `webchat_history.json`
+- binds `127.0.0.1` only — do not expose it
 
----
+## What the agent decides
 
-## agent 在决定什么
+Each turn it receives a JSON `situation`: noise mean/peak/trend, music energy,
+beat and track, whether someone is at the computer, idle seconds, room lux, **the
+eleven numbers it last wrote**, four drives, the last six memories and events.
+When you speak, the situation gains a `said` field and that turn must answer.
 
-每轮给模型一个 JSON `situation`：噪音均值/峰值/趋势、音乐能量/节拍/曲名、人是否
-在电脑前、空闲秒数、照度、**它自己上一次写的 11 个参数**、四个 drives、最近 6 条
-记忆和事件。你说话时，`situation` 里会多一个 `said` 字段，那一轮它要回你一句话。
-
-| 工具 | 作用 |
+| Tool | What it does |
 |---|---|
-| `set_light` | **写 11 个数字**：hue / sat / val / grad / wave_n / wave_amp / wave_hz / breath_hz / breath_amp / open / ease。没有枚举，漏写的字段保持原值 |
-| `blink` | blink / wince，一次性瞬态，不改变样子 |
-| `set_reflex` | 调自己的反射：多容易被吓到、手靠近影响多大、走开变多暗、音乐进光多少 |
-| `feel` | 调整 energy / curiosity / security / bond（增量） |
-| `remember` | 写一条有显著性的记忆 |
-| `observe` | 需要时再读传感器/macOS/音乐 |
+| `set_light` | writes the eleven numbers: hue / sat / val / grad / wave_n / wave_amp / wave_hz / breath_hz / breath_amp / open / ease. No enums; omitted fields keep their value |
+| `blink` | blink or wince — a transient, not a new appearance |
+| `set_reflex` | tune its own body: how easily a sound startles it, how much a hand matters, how much it dims when you leave, how much music shows |
+| `feel` | nudge drives (energy / curiosity / security / bond), deltas only |
+| `remember` | store something worth remembering tomorrow |
+| `observe` | read sensors, macOS context, music — at most once per turn |
 
-**它不是从菜单里选一个。** `set_light` 接受 11 个连续值，所以「暗一点」「流动
-起来」「别那么刺」都是改一两个数字。感知层（[reflex.py](host/reflex.py)）再叠加
-在上面——agent 定「是什么样」，反射决定「对当下怎么反应」。
+**It is not choosing from a menu.** `set_light` takes eleven continuous values,
+so "a little darker", "make it flow" and "too harsh" are each one or two
+numbers. The reflex layer then rides on top: the agent decides *what it looks
+like*, the reflex decides *how it answers the room*.
 
----
+## The reflex layer
 
-## 协议
+[reflex.py](host/reflex.py) runs inside the 25 Hz frame loop. It never touches
+the network, so it survives a dead API.
 
-完整字段、优先级、时序、容错见 [PROTOCOL.md](PROTOCOL.md)。最常用：
-
-```
-电脑 → 灯   F,150,220,180,20,2,30,40,10,40,80,600   20–30 Hz 画面参数（核心）
-电脑 → 灯   K,0                          眨一下眼
-电脑 → 灯   G,60,1,1                     亮度上限 / gamma / 抖动
-电脑 → 灯   L,42                         20 Hz 环境声
-电脑 → 灯   U,62,90,1                    20 Hz 音乐，只调制
-电脑 → 灯   K,0 / K,1 / K,2,255          眨眼 / 缩一下 / 闪白
-电脑 → 灯   C,80,70,50,60                耦合增益
-电脑 → 灯   R,55,120,1                   反射阈值
-灯 → 电脑   S,12,345,8,43,host,70,0      遥测（origin / open / flags）
-灯 → 电脑   E,STARTLE
-```
-
-`F` 一行就是「这一刻长什么样」：色相、饱和度、感知亮度、沿环的色相跨度、
-空间波、呼吸、开合度、缓动时间。宿主以 25 Hz 连发，固件在 50 fps 上插值。
-host 现在只发 `F` / `K` / `G`；`M` 和 `LID` 是固件保留的旧入口，宿主导不再用。
-
----
-
-## 成本
-
-DeepSeek `deepseek-flash`：[官方定价](https://api-docs.deepseek.com/quick_start/pricing)
-约 **$0.15 / $0.30 每百万输入**（off-peak/peak）、**$0.60 / $1.20 每百万输出**；
-缓存命中输入仅 $0.003/$0.006。
-
-一次调用约 2–3k 输入 + 200 输出，约 **$0.0005–0.001**。默认 60 次/小时上限，
-约 **$0.03/小时**，24 小时不停约 **$0.7/天**；实际演示频率远低于此。
-系统提示词和工具表稳定，能吃到上下文缓存。
-
----
-
-## 调试手册
-
-| 现象 | 先查 | 处理 |
+| Sensor | Changes | Feels like |
 |---|---|---|
-| 灯完全不亮 | 发 `T` | 有自检 → 查 5V/共地/数据脚；无自检 → 查供电与上传 |
-| 颜色乱 / 闪烁 | 数据线 | 串 330 Ω、加电平转换、缩短线、共地 |
-| 找不到串口 | `--list-devices` | 关掉 Arduino 串口监视器；双击 reset |
-| 麦克风打不开 | 系统设置 | 给终端麦克风权限；先用 `--sim-audio` 排除 |
-| 底噪校准离谱 | 启动日志 `baseline` | 校准 3 秒内保持安静；正常约 -55 ~ -45 dBFS |
-| 灯不跟随声音 | 状态栏 `lvl` | 不动 → 音频没进来；动但灯不动 → `link=--` |
-| 灯对音乐不敏感 | `lampctl.py observe` 的 `senses level/music` | `level` 长期 <10 → 启动时房间有声音，基线被抬高；**安静状态下重启 host** |
-| DeepSeek 401/404 | key 与模型名 | `echo $DEEPSEEK_API_KEY`；`--model deepseek-flash` |
-| 一直 `holding state` | 日志 `skip/error` | 看是否 `hourly cap` / `circuit open`；调 `--max-calls-per-hour` |
-| 音乐没节拍 | `--list-devices` | 装 BlackHole + Multi-Output；或接受麦克风回退 |
-| 灯不睡（不暗） | `lampctl observe` 的 `light.val` | agent 一直写高 `val`；说「暗一点」或 `lampctl light --val 70` |
-| 串口断开后不恢复 | 日志 | 宿主每 2 秒重连；灯 12 秒后转自主，属于预期 |
+| Room mic / system audio | breath depth (≈60% quiet → ≈150% loud), a little brightness, breath *speed* | a quiet room breathes deeply; music makes it move |
+| Beat | a ~200 ms pulse on `val`, plus a small lift of `open` | it moves with the kick |
+| Proximity | `open`, brightness, hue toward warm | it notices a hand |
+| Room light | a brightness floor | brighter by day, dimmer at night |
+| Idle time | slowly dims (up to 35%) | it gets sleepy when you leave |
+| A sudden level jump | `K,2,255` + `K,1` | a clap makes it flash and recoil |
 
----
+Design rules:
 
-## 演示脚本（约 3 分钟）
+- **Additive, not authoritative.** The reflex bends the agent's base, never
+  replaces it, so "who owns the lamp" stays answerable.
+- **The board's own coupling is off.** The stream sends `C,0,0,0,0` once, or the
+  firmware would add a second layer of music gain.
+- **A startle needs an edge**: 10 level units in one frame, plus 26 over a slow
+  average, plus 45 absolute, plus a 2 s cooldown. A crowd getting louder does not
+  startle it.
+- **Music never startles**: the startle reads the microphone only.
+- **Loudness is `max(room, music)`, not a sum**, so a loud room playing loud
+  music is not counted twice.
 
-1. 安静房间启动，纸罩青色呼吸，日志打出 drives。
-2. 拍手：固件闪白 + wince（不联网也成立）；1–2 s 后 DeepSeek 决定 alert，
-   日志给出 reason。
-3. 手靠近：prox 变化，灯变暖/变亮；模型说「someone is near」。
-4. 放音乐：`U` 节拍脉冲，灯跟着鼓点；模型看到曲名后调整 beat 增益和色板。
-5. 人离开 1 分钟：idle 上升，灯慢慢闭眼、drives 变化、写一条记忆。
-6. 回来：灯慢慢睁眼；日志里有「记得你离开过」。
-7. 拔网线：不再有 M，180 s 后固件回自主；插回后恢复。
+All the numbers live in `ReflexConfig`.
 
----
+## Protocol
 
-## 已知限制
+Full spec in [PROTOCOL.md](PROTOCOL.md). The short version:
 
-- 板载 PDM 麦克风无信号，声音依赖电脑；电脑休眠 = 灯失去听觉。
-- 只有数值摘要离开电脑（等级、趋势、接近、照度、曲名），没有音频文件。
-- 眼皮目前是灯光调制，不是机械翻板；舵机代码保留但未启用。
-- ToF 已买未接；固件目前仍用 APDS9960 的粗接近值。
-- 固件只在主机侧做了语法/行为仿真，**没有用真实 nRF52 工具链编译过**；第一次
-  上板若有 API 差异，按 IDE 报错微调。
-- 32 颗全白电流很大，亮度锁 40；不要直接改到 255。
+```
+host → lamp   F,150,220,180,20,2,30,40,10,40,80,600   25 Hz, the look
+host → lamp   K,0 / K,1 / K,2,255                     blink / wince / flash
+host → lamp   G,80,1,1                                cap / gamma / dither
+host → lamp   C,0,0,0,0                               once: do not add your own coupling
+lamp → host   S,12,345,8,43,host,70,0                 telemetry: prox, als, lux, energy, origin, open, flags
+lamp → host   E,FRAME_LOST / E,FRAME_OK / E,STARTLE / E,WAKE
+```
 
----
+The firmware still accepts the v2.1 commands (`L`, `M`, `LID`, `U`, `C`, `R`).
+The host no longer sends any of them; they are kept until firmware v2.3.
 
-## 下一步
+## Cost
 
-- 接 VL53L0X：距离/接近事件，APDS 只管 lux。
-- 加 SG90 眼皮模块：`ENABLE_SERVO 1` + 机械翻板，协议不变。
-- 把 drives/事件导出 JSONL，直接进报告图。
-- 多灯同步：把 `F`/`K` 广播到多个串口。
+DeepSeek `deepseek-flash`: about $0.15 / $0.30 per million input tokens
+(off-peak/peak) and $0.60 / $1.20 per million output. A turn is roughly
+2–3k input + 200 output, so about **$0.0005–0.001**. At the default 60 calls per
+hour that is about **$0.03/hour**.
+
+## Troubleshooting
+
+| Symptom | Look at | Do |
+|---|---|---|
+| Lamp completely dark | send `T` | self-test works → check 5 V, ground, data pin; nothing → check power and upload |
+| Wrong colours, flicker | data line | 330 Ω series, level shifter, shorter wire, common ground |
+| No serial port | `--list-devices` | close the Arduino serial monitor, double-tap reset |
+| Microphone will not open | System Settings → Privacy → Microphone | give the terminal permission; test with `--sim-audio` |
+| Baseline looks wrong | `baseline … dBFS` at startup | restart in a quiet room (a loud baseline makes it deaf) |
+| Lamp does not follow sound | status line `lvl` | flat → no audio; moving but the lamp is still → `link=--` |
+| Lamp ignores music | `lampctl observe`, `senses level/music` | `level` under 10 → the baseline was calibrated with music playing; restart quietly |
+| Level pinned at 100 | log warning | raise `--span-db` (18 → 30 for music) |
+| DeepSeek 401/404 | key and model name | `echo $DEEPSEEK_API_KEY`; `--model deepseek-flash` |
+| Always "holding state" | log `skip` / `error` | hourly cap or circuit open; adjust `--max-calls-per-hour` |
+| No replies in the page | `host/logs/host.log`, the `mind ->` line | no key, or the turn produced neither words nor a tool call |
+| Lamp does not sleep | `lampctl observe` → `light.val` | the agent keeps it bright; say "darker" or `lampctl light --val 70` |
+| Serial does not recover | log | the host retries every 2 s; the lamp goes autonomous after 1.5 s, by design |
+
+## Demo script (~3 minutes)
+
+1. Start in a quiet room: amber breathing, slowly rotating band.
+2. Clap: the firmware flashes and winces; within a second the agent decides
+   something and the log shows why.
+3. Put a hand near: `open` and brightness rise, the hue warms.
+4. Play music: breath deepens and speeds up, the beat lifts the eye and the
+   brightness.
+5. Walk away for a minute: it dims, drives drift, it remembers something.
+6. Come back: it opens up again.
+7. Kill the host: `FRAME_LOST` after 1.5 s, the lamp eases into its own amber
+   breathing. Start the host again: `FRAME_OK`.
+
+## Known limits
+
+- The onboard PDM microphone has no signal, so hearing depends on the computer.
+  The laptop sleeping means the lamp goes deaf.
+- Only numbers leave the computer (level, trend, proximity, lux, track title).
+  No audio is ever sent.
+- BlackHole is not installed yet: the beat falls back to the microphone, and a
+  laptop speaker never reproduces the kick drum it would need.
+- ToF is bought but not wired; proximity is still the APDS9960's rough value.
+- Firmware v2.3 (removing `M`/`LID`/`L`/`U`/`C`/`R` and the preset table) needs a
+  reflash and has not been done.
+
+## Next
+
+1. Confirm the web chat replies on the real lamp, then tag `v1.0.0`.
+2. Firmware v2.3: delete the legacy commands and the preset table.
+3. BlackHole, so the beat is measured instead of guessed.
+4. Wire the VL53L0X and give proximity a real distance.
+5. Multi-lamp: broadcast `F`/`K` to several ports.

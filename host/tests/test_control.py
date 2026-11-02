@@ -56,7 +56,7 @@ class TestControlServer(unittest.TestCase):
             senses=lambda: {"level": 12.0, "music": 3, "beat": 0,
                             "prox": 12, "lux": 18.0, "present": True, "idle_s": 5},
             say=lambda text: (self.said.append(text) or
-                              {"ok": True, "reply": "嗯。", "actions": []}),
+                              {"ok": True, "reply": "mm.", "actions": []}),
         )
         self.server.start()
 
@@ -103,10 +103,10 @@ class TestControlServer(unittest.TestCase):
         self.assertIn("K,1", self.link.lines)
 
     def test_say_reaches_the_agent(self):
-        response = send({"cmd": "say", "text": "暗一点"}, self.socket_path)
+        response = send({"cmd": "say", "text": "a little darker"}, self.socket_path)
         self.assertTrue(response["ok"])
-        self.assertEqual(response["reply"], "嗯。")
-        self.assertEqual(self.said, ["暗一点"])
+        self.assertEqual(response["reply"], "mm.")
+        self.assertEqual(self.said, ["a little darker"])
 
     def test_say_without_text_is_an_error(self):
         response = send({"cmd": "say", "text": "  "}, self.socket_path)

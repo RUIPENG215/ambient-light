@@ -185,19 +185,19 @@ HTML = r"""<!doctype html>
       <div class="row"><span>mac</span><b id="mac">—</b></div>
     </div>
     <div class="quick">
-      <button data-action="darker">暗一点</button>
-      <button data-action="brighter">亮一点</button>
-      <button data-action="flowing">流动一点</button>
-      <button data-action="blink">眨一下</button>
+      <button data-action="darker">dimmer</button>
+      <button data-action="brighter">brighter</button>
+      <button data-action="flowing">more flow</button>
+      <button data-action="blink">blink</button>
     </div>
     <div class="foot" id="llm">DeepSeek: checking…</div>
   </aside>
   <main>
     <div class="chatlog" id="log"></div>
-    <div class="hint">Enter 发送，Shift+Enter 换行。它只会用光和眼睛回答。</div>
+    <div class="hint">Enter to send, Shift+Enter for a new line. It answers with light, and with a few words.</div>
     <div class="composer">
-      <textarea id="input" rows="1" placeholder="和它说点什么…"></textarea>
-      <button id="send">发送</button>
+      <textarea id="input" rows="1" placeholder="say something to it…"></textarea>
+      <button id="send">send</button>
     </div>
   </main>
 </div>
@@ -229,7 +229,7 @@ function setText(id, value) {
 function renderStatus(d) {
   const online = !!d.online;
   $("dot").className = "dot " + (online ? "on" : "off");
-  setText("conn", online ? "灯在线" : "灯离线");
+  setText("conn", online ? "lamp online" : "lamp offline");
   const lamp = d.lamp || {};
   const sensors = d.sensors || {};
   const music = d.music || {};
@@ -237,11 +237,11 @@ function renderStatus(d) {
   const light = lamp.light || {};
   setText("mood", "hue " + (light.hue ?? 0) + " · val " + (light.val ?? 0));
   setText("lid", (light.open ?? 0) + "%");
-  setText("prox", (sensors.prox ?? 0) + (sensors.prox >= 120 ? " · 手在附近" : ""));
+  setText("prox", (sensors.prox ?? 0) + (sensors.prox >= 120 ? " · hand nearby" : ""));
   setText("lux", (sensors.lux ?? 0) + " lx");
-  setText("music", (music.energy ?? 0) + "/100" + (mac.playing ? " · " + (mac.title || "播放中") : ""));
+  setText("music", (music.energy ?? 0) + "/100" + (mac.playing ? " · " + (mac.title || "playing") : ""));
   setText("lease", lamp.stream || "off");
-  setText("mac", mac.user_present ? "在电脑前" : "离开了 " + (mac.idle_s ?? 0) + "s");
+  setText("mac", mac.user_present ? "at the desk" : "away " + (mac.idle_s ?? 0) + "s");
   setText("llm", d.llm ? "agent: ready" : "agent: off · reflex only");
 }
 
@@ -250,7 +250,7 @@ async function refresh() {
     renderStatus(await api("/api/status"));
   } catch (err) {
     $("dot").className = "dot off";
-    setText("conn", "webchat 离线");
+    setText("conn", "webchat offline");
   }
 }
 
@@ -269,7 +269,7 @@ async function send() {
   input.value = "";
   add("user", text);
   sendBtn.disabled = true;
-  const thinking = add("sys", "灯在感受…");
+  const thinking = add("sys", "the lamp is feeling…");
   try {
     const data = await api("/api/chat", {
       method: "POST",
@@ -280,7 +280,7 @@ async function send() {
     add("lamp", data.reply || "……");
   } catch (err) {
     thinking.remove();
-    add("lamp", "我刚才走神了。");
+    add("lamp", "I lost the thread for a moment.");
   } finally {
     sendBtn.disabled = false;
     input.focus();
@@ -295,9 +295,9 @@ async function action(name) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name })
     });
-    add("lamp", data.ok ? "好。" : "没成功：" + (data.error || "灯没连上"));
+    add("lamp", data.ok ? "ok" : "failed: " + (data.error || "the lamp is not connected"));
   } catch (err) {
-    add("lamp", "没成功：灯没连上。");
+    add("lamp", "failed: the lamp is not connected.");
   }
   refresh();
 }
@@ -396,18 +396,18 @@ class ChatEngine:
     def chat(self, message: str) -> str:
         text = " ".join(str(message).split())[:500]
         if not text:
-            return "你还没说话。"
+            return "You have not said anything yet."
         result = self._control({"cmd": "say", "text": text}, timeout=25.0)
         if result.get("ok"):
             reply = str(result.get("reply") or "").strip()
             if not reply:
                 actions = result.get("actions") or []
-                reply = "（它动了一下灯，没说话。）" if actions else "……"
+                reply = "(it moved the light, and said nothing)" if actions else "…"
         elif result.get("offline"):
-            reply = ("我现在只有反射——没有连上大脑（缺 API key）。"
-                     "灯还在呼吸，也会对声音和靠近有反应。")
+            reply = ("I only have reflexes right now — no mind connected (no API key). "
+                     "I am still breathing, and I still react to sound and to a hand.")
         else:
-            reply = "我刚才走神了，没接上。"
+            reply = "I lost the thread, sorry."
             LOG.info("chat failed: %s", result.get("error"))
         self._remember("user", text)
         self._remember("assistant", reply)

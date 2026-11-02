@@ -1,65 +1,68 @@
-# 串口协议 — Interactive Ambient Light v2.2
+# Serial protocol — Interactive Ambient Light v2.2
 
-电脑（宿主）与 Feather nRF52840 Sense 之间的全部通信都走这一条 USB CDC 串口。
-协议是 **面向行** 的 ASCII：一帧一行，`\n` 结尾，字段用逗号分隔。
+Everything between the host (the computer) and the Feather nRF52840 Sense goes
+over one USB CDC serial line. The protocol is **line oriented** ASCII: one frame
+per line, terminated by `\n`, fields separated by commas.
 
-- 波特率：115200（USB CDC 下实际速率无关紧要，但两边保持一致）
-- 编码：ASCII；固件忽略 `\r`，所以 `\r\n` 也能用
-- 单行上限：**80 字节**（固件缓冲区），超长整行丢弃
-- 未知命令 / 未知事件：忽略，不报错（便于以后加字段）
+- Baud 115200 (irrelevant over USB CDC, but both sides agree)
+- ASCII; the firmware ignores `\r`, so `\r\n` also works
+- Line limit: **80 bytes** (firmware buffer); longer lines are dropped whole
+- Unknown commands and events are ignored, never fatal, so fields can be added later
 
 ```
-电脑  --F / K / G / L / M / LID / U / C / R / P / T / X-->  Feather
-Feather  --S / E / PONG-->  电脑
+host   --F / K / G / P / T / X-->  Feather
+Feather  --S / E / PONG-->  host
 ```
 
-**v2.2 的变化**：固件不再有「心情」。它只认识色场、空间波、呼吸包络、瞬态和
-反射；宿主用 `F` 帧以 20–30 Hz 描述「这一刻看起来是什么样」。
-`M` / `LID` 保留为兼容别名，旧宿主可以完全不改继续跑。
-设计动机见 [FIRMWARE-API.md](FIRMWARE-API.md)。
+**What changed in v2.2.** The firmware no longer has "moods". It knows a colour
+field, a spatial wave, a breathing envelope, transients and reflexes; the host
+describes the look with `F` frames at 20–30 Hz. The v2.1 commands (`L`, `M`,
+`LID`, `U`, `C`, `R`) are still accepted for compatibility but **the host no
+longer sends them**. Design rationale in [FIRMWARE-API.md](FIRMWARE-API.md).
 
 ---
 
-## 1. 电脑 → 灯
+## 1. Host → lamp
 
-### `F,<hue>,<sat>,<val>,<grad>,<wave_n>,<wave_amp>,<wave_hz>,<breath_hz>,<breath_amp>,<open>,<ease_ms>` — 参数帧（核心）
+### `F,<hue>,<sat>,<val>,<grad>,<wave_n>,<wave_amp>,<wave_hz>,<breath_hz>,<breath_amp>,<open>,<ease_ms>` — the look
 
-| 字段 | 范围 | 单位 | 说明 |
+| Field | Range | Unit | Meaning |
 |---|---|---|---|
-| `hue` | 0–255 | 色环 | 基色；0 红、42 黄、85 绿、128 青、150 蓝绿、170 蓝、213 品红 |
-| `sat` | 0–255 | — | 饱和度 |
-| `val` | 0–255 | 亮度幅值 | 线性；若 `G` 打开了 gamma 则按感知编码解释 |
-| `grad` | −128…127 | 色相 | 沿灯环的色相跨度；0 = 均匀一色 |
-| `wave_n` | 0–16 | 波数 | 沿环的空间波数；0 = 关闭 |
-| `wave_amp` | 0–100 | % | 空间波的亮度起伏深度 |
-| `wave_hz` | 0–255 | 0.01 Hz | 空间波沿环漂移的速度 |
-| `breath_hz` | 0–255 | 0.01 Hz | 呼吸包络频率 |
-| `breath_amp` | 0–100 | % | 呼吸深度 |
-| `open` | 0–100 | % | 开合度；无舵机时映射成亮度增益 |
-| `ease_ms` | 0–10000 | ms | 向本帧插值的时间常数；0 = 立即 |
+| `hue` | 0–255 | colour wheel | base colour; 0 red, 42 yellow, 85 green, 128 cyan, 150 teal, 170 blue, 213 magenta |
+| `sat` | 0–255 | — | saturation |
+| `val` | 0–255 | brightness | base amplitude |
+| `grad` | −128…127 | hue | hue spread across the ring; 0 is one flat colour |
+| `wave_n` | 0–16 | waves | travelling bands around the ring; 0 disables |
+| `wave_amp` | 0–100 | % | depth of those bands |
+| `wave_hz` | 0–255 | 0.01 Hz | how fast they travel |
+| `breath_hz` | 0–255 | 0.01 Hz | breathing rate |
+| `breath_amp` | 0–100 | % | breathing depth |
+| `open` | 0–100 | % | eyelid; without a servo it is a brightness gain |
+| `ease_ms` | 0–10000 | ms | time constant to reach this frame; 0 = immediately |
 
 ```
 F,150,220,180,20,2,30,40,10,40,80,600
 ```
 
-- 频率：**20–30 Hz**（建议 25 Hz）。单帧 30–45 字节，25 Hz 约 0.9 kB/s
-- **字段缺失 = 沿用上一帧**；数值越界 = 该字段被钳到范围内，其余照常
-- 一帧合法数字都没有 → 不刷新帧时钟（不会因为一条坏行把灯切成兜底）
-- `F` **不产生任何事件**，可以放心 25 Hz 连发
-- 1.5 s 没有新的 `F`（且没有新鲜的 `M`）→ 缓出到兜底 look，见 §5
+- Rate: **20–30 Hz**, 25 Hz recommended. A frame is 30–45 bytes, about 0.9 kB/s
+- **Missing fields keep their previous value**; out-of-range values are clamped
+- A frame with no valid number does not refresh the frame clock
+- `F` produces **no events**; it is safe to stream continuously
+- 1.5 s without a frame (and without a fresh `M`) → ease into the fallback look (§5)
 
-### `K,<type>[,<strength>]` — 瞬态
+### `K,<type>[,<strength>]` — transients
 
-| type | 动作 | 时序 |
+| type | Action | Timing |
 |---|---|---|
-| 0 | blink | 120 ms 闭 → 60 ms 停 → 180 ms 回到当前 `open` |
-| 1 | wince | 100 ms 压到 `min(15, open)` → 1500 ms 回 |
-| 2 | flash | `strength` 0–255 白闪，指数衰减（τ = 0.28 s，默认强度 255） |
+| 0 | blink | 120 ms close → 60 ms hold → 180 ms back to the current `open` |
+| 1 | wince | 100 ms down to `min(15, open)` → 1500 ms back |
+| 2 | flash | white flash, `strength` 0–255, exponential decay (τ = 0.28 s, 255 when omitted) |
 
-- 瞬态是**叠加层**：不改变 `open` 的目标值，跑完自己回到流里的值
-- 同时只保留一个；新的覆盖旧的
-- 受惊反射（`STARTLE`）内部触发同一个 flash + wince
-- `K` 只刷新链路看门狗，**不刷新** `F` 的帧时钟
+- A transient is an **overlay**: it does not change the target `open` and returns
+  to the stream by itself
+- One at a time; a new one replaces the old
+- A startle (`E,STARTLE`) uses the same flash + wince internally
+- `K` refreshes the link watchdog but **not** the frame clock
 
 ```
 K,0
@@ -67,259 +70,183 @@ K,1
 K,2,200
 ```
 
-### `G,<cap>,<gamma>,<dither>` — 渲染配置
+### `G,<cap>,<gamma>,<dither>` — render configuration
 
-| 字段 | 范围 | 默认 | 说明 |
+| Field | Range | Default | Meaning |
 |---|---|---|---|
-| `cap` | 0–255 | 60 | 通道上限，取代 v2.1 的 `BRIGHTNESS 40` |
-| `gamma` | 0/1/2 | **0** | 0 = 线性（默认，v2.1 行为）/ 1 = 2.2 / 2 = 2.8 |
-| `dither` | 0/1 | 1 | 时域抖动；**只在通道值 ≥ 8 时生效** |
+| `cap` | 0–255 | 60 | channel ceiling (replaces v2.1's `BRIGHTNESS 40`) |
+| `gamma` | 0/1/2 | 0 | 0 linear / 1 = 2.2 / 2 = 2.8 |
+| `dither` | 0/1 | 1 | temporal dither, only above a channel value of 8 |
 
-`gamma` 默认为 0 是刻意的：在 `cap 60–80` 和「亮度 × 呼吸 × 开合」三层衰减之后，
-通道值经常只有 10–30；再套 2.2 会把它压到 1–3，那时 8 位量化的每一步都是成倍
-变化，观感就是闪。gamma 是「想统一亮度语义」时才打开的实验项，不是默认。
+`gamma` defaults to 0 on purpose: after `val`, the breathing envelope and the
+openness gain, channel values often sit around 10–30, and a 2.2 curve pushes
+them to 1–3, where one code step is a doubling and the lamp visibly flickers.
+Gamma is an experiment, not the default.
 
-```
-G,60,1,1
-G,80,1,1      # 外部 5V 供电、想更亮时
-G,40,0,0      # 一键回到 v2.1 的观感
-```
+Power at 32 LEDs full white: `cap` 40 → 0.30 A, 60 → 0.45 A, 80 → 0.60 A. Above
+60 needs the external supply. Not persisted; send it once per connection.
 
-功耗参考（32 颗全白）：`cap` 40 → 0.30 A，60 → 0.45 A，80 → 0.60 A。
-只用 USB 供电不要超过 60。掉电不保存，宿主连接后发一次即可。
+### `L,<level>` — room noise (v2.1, still accepted)
 
-### `L,<level>` — 环境噪音（快循环）
-
-| 字段 | 范围 | 说明 |
+| Field | Range | Meaning |
 |---|---|---|
-| `level` | 0–100 | 0 = 底噪，100 = 比底噪高 `SPAN_DB`（默认 18 dB） |
+| `level` | 0–100 | 0 = baseline, 100 = `SPAN_DB` (18 dB by default) above it |
 
-- 频率：20 Hz（`--fast-hz`）
-- 驱动呼吸幅度；突跳（≥25）且绝对值 ≥ `R` 的阈值时触发 `STARTLE`
-- 这是**唯一**能触发受惊反射的音频通道
+Used to trigger the firmware's own startle. **The host no longer sends it** — the
+reflex layer on the computer owns that.
 
-```
-L,42
-```
+### `M,<preset>,<hue>,<speed>,<bright>,<lid>` — v2.1 preset shorthand
 
-### `M,<preset>,<hue>,<speed>,<bright>,<lid>` — 旧版心情简写（兼容保留）
+Kept so an old host keeps working. It maps to a table of `F` parameters and
+answers `E,CMD,<preset>`. Fields: preset is `calm` / `alert` / `curious` /
+`sleepy`; `bright` scales `val`; `lid` becomes `open`; `speed` is ignored.
+**The host no longer sends it.**
 
-内部等价于查表得到一套 `F` 参数，一次性写入。固件不认识「心情」，
-只把它当成一组常用数值的别名。
+### `LID,<open>,<ms>,<mode>[,<amp>,<period>]` — v2.1 eyelid
 
-| 字段 | 范围 | 说明 |
-|---|---|---|
-| `preset` | `calm` / `alert` / `curious` / `sleepy` | 取值表见下 |
-| `hue` | 0–255 | 基色（`sleepy` 固定为 30 琥珀） |
-| `speed` | 0–255 | 已不参与渲染（频率由预设表固定），保留为了字段数不变 |
-| `bright` | 0–255 | 相对强度，乘到预设的 `val` 上 |
-| `lid` | 0–100 | 落到 `open` |
+`mode` 0 hold, 1 breathe, 2 blink, 3 wince. Now an alias for `open` + `K`.
+Deprecated; **the host no longer sends it.**
 
-| preset | breath_hz | breath_amp | wave_n | wave_amp | wave_hz | grad | sat | val |
-|---|---|---|---|---|---|---|---|---|
-| `calm` | 24 | 71 | 1 | 4 | 10 | 8 | 235 | 196 |
-| `alert` | 120 | 45 | 3 | 35 | 60 | 16 | 245 | 230 |
-| `curious` | 10 | 10 | 1 | 70 | 30 | 15 | 220 | 200 |
-| `sleepy` | 8 | 40 | 1 | 4 | 2 | 4 | 230 | 120 |
+### `U,<music>,<beat>,<present>` — v2.1 music bus
 
-- **兼容 TTL = 180 s**：`M` 的「宿主在场」判定比 `F` 宽，否则每 30 s 才发一次的
-  旧宿主会被 1.5 s 的帧超时误判成掉线
-- 非法 `preset`：整帧忽略；缺失字段沿用旧值
-- 收到后回 `E,CMD,<preset>`
+Modulation only; never triggers a startle. Superseded by `C,0,0,0,0` plus the
+host reflex layer.
 
-```
-M,calm,150,80,180,70
-```
+### `C,<audio>,<beat>,<prox>,<idle>` — v2.1 coupling
 
-### `LID,<open>,<ms>,<mode>[,<amp>,<period>]` — 旧版眼皮（兼容保留）
+The host sends exactly one of these, `C,0,0,0,0`, to tell the firmware not to add
+its own coupling on top of the reflex layer. `prox` and `idle` were never read.
 
-| 字段 | 范围 | 说明 |
-|---|---|---|
-| `open` | 0–100 | 目标开合度；blink/wince 时是「回到」的开合度 |
-| `ms` | 0–60000 | 过渡时间；0 = 立即 |
-| `mode` | 0–3 | 0 hold、1 breathe、2 blink、3 wince |
+### `R,<startle>,<prox>,<enabled>` — v2.1 reflex thresholds
 
-- `mode 0/1` → 等价于把 `open` 写进 `F` 的 `open` 字段（`breathe` 参数被忽略，
-  呼吸请用 `F` 的 `breath_*`）
-- `mode 2/3` → 等价于 `K,0` / `K,1`，同时把 `open` 作为回归目标
-- 新代码请直接用 `F` + `K`；`LID` 计划在 v2.3 删除
-
-### `U,<music>,<beat>,<present>` — 音乐调制总线
-
-| 字段 | 范围 | 说明 |
-|---|---|---|
-| `music` | 0–100 | 系统音频能量或麦克风能量的平滑值 |
-| `beat` | 0–100 | 低频 onset 脉冲；>20 时加一个衰减脉冲 |
-| `present` | 0/1 | 人是否在电脑前（固件当前不读，留给宿主语义） |
-
-- 频率：20 Hz；**只做调制，永不触发 `STARTLE`**
-- 1.5 s 没有新的 `U`，音乐增益回落到 1.0
-- 实际影响由 `C` 的 audio/beat 增益缩放
-
-```
-U,62,90,1
-```
-
-### `C,<audio>,<beat>,<prox>,<idle>` — 耦合增益
-
-| 字段 | 作用 |
-|---|---|
-| `audio` | 音乐能量对亮度的调制幅度 |
-| `beat` | 节拍脉冲对亮度/眼皮的幅度 |
-| `prox` | 预留（固件目前不读） |
-| `idle` | 预留（宿主侧使用） |
-
-```
-C,80,70,50,60
-```
-
-### `R,<startle>,<prox>,<enabled>` — 反射阈值
-
-| 字段 | 范围 | 说明 |
-|---|---|---|
-| `startle` | 0–100 | 触发 STARTLE 的绝对等级（默认 45） |
-| `prox` | 0–255 | 靠近判定阈值（默认 120） |
-| `enabled` | 0/1 | 关闭后不再本地受惊 / 唤醒 |
-
-```
-R,55,120,1
-```
+No longer sent: the startle lives in the host reflex layer now.
 
 ### `P` / `T` / `X`
 
-- `P`：心跳，固件回 `PONG`
-- `T`：红/绿/蓝/白自检，**阻塞约 1.2 s**。流式 `F` 期间不要用，会丢帧
-- `X`：交还兜底 look，并清掉宿主在场状态
+- `P` — heartbeat, the firmware answers `PONG`
+- `T` — red/green/blue/white self-test, **blocks ~1.2 s**. Do not use while
+  streaming; about 14 kB arrives during the block and frames are lost
+- `X` — drop the host look, back to the fallback
 
 ---
 
-## 2. 灯 → 电脑
+## 2. Lamp → host
 
-### `S,<prox>,<als>,<lux>,<energy>,<origin>,<open>,<flags>` — 遥测
+### `S,<prox>,<als>,<lux>,<energy>,<origin>,<open>,<flags>` — telemetry
 
-| 字段 | 范围 | 说明 |
+| Field | Range | Meaning |
 |---|---|---|
-| `prox` | 0–255 | APDS9960 接近值，手掌靠近约 150+ |
-| `als` | 0–65535 | 环境光原始 clear 通道 |
-| `lux` | 0–65535 | 由 RGB 估算的照度（近似值） |
-| `energy` | 0–100 | 固件平滑后的噪音等级 |
-| `origin` | `host` / `fallback` | **v2.2 改动**：这里原来是心情名 |
-| `open` | 0–100 | 当前开合度（原 `lid`，位置不变） |
-| `flags` | 0–7 | bit0 STARTLE 生效中、bit1 兜底打瞌睡、bit2 帧超时 |
+| `prox` | 0–255 | APDS9960 proximity; a hand close by is 150+ |
+| `als` | 0–65535 | raw ambient light (clear channel) |
+| `lux` | 0–65535 | estimated illuminance |
+| `energy` | 0–100 | smoothed noise level as the firmware sees it |
+| `origin` | `host` / `fallback` | who is driving the look |
+| `open` | 0–100 | current openness |
+| `flags` | 0–7 | bit0 startle active, bit1 fallback dozing, bit2 frame timeout |
 
-- 频率：4 Hz（`REPORT_MS = 250`）
-- v2.1 的宿主按 `len(parts) >= 6` 解析，第 6 个字段会拿到 `"host"` / `"fallback"`
-  这两个词而不是心情名；新增的 `flags` 追加在行尾，不会破坏旧解析
+- Rate 4 Hz (`REPORT_MS = 250`)
+- A v2.1 host parses with `len(parts) >= 6` and simply receives `"host"` or
+  `"fallback"` where it used to see a mood name; `flags` is appended at the end
 
 ```
 S,12,345,8,43,host,70,0
 ```
 
-### `E,<event>[,<detail>]` — 事件
+### `E,<event>[,<detail>]` — events
 
-| 事件 | detail | 含义 |
+| Event | Detail | Meaning |
 |---|---|---|
-| `BOOT` | 固件版本 | 上电/复位，如 `E,BOOT,2.2.0` |
-| `CMD` | preset | 收到一条 `M`（`F` 不产生此事件） |
-| `STARTLE` | — | 突跳触发受惊（闪白 + wince） |
-| `WAKE` | `prox` | 兜底模式打瞌睡时被靠近唤醒 |
-| `FRAME_LOST` | — | 1.5 s 没有 `F`/`M`，交还兜底 look |
-| `FRAME_OK` | — | 宿主重新接管（只在丢失之后发一次） |
-| `LINK_LOST` | — | 12 s 没收到任何字节 |
-| `LINK_OK` | — | 链路恢复 |
-| `SENSOR_FAIL` | `apds9960` | I2C 初始化失败，遥测会一直为 0 |
-| `RESET` | — | 收到 `X` |
+| `BOOT` | firmware version | e.g. `E,BOOT,2.2.0` |
+| `CMD` | preset | a legacy `M` was accepted |
+| `STARTLE` | — | the firmware's own startle (only when it receives `L`) |
+| `WAKE` | `prox` | fallback mode, dozing, woken by a hand |
+| `FRAME_LOST` | — | 1.5 s without `F`/`M`, easing into the fallback |
+| `FRAME_OK` | — | the host took over again (once, after a loss) |
+| `LINK_LOST` | — | 12 s without any bytes |
+| `LINK_OK` | — | link recovered |
+| `SENSOR_FAIL` | `apds9960` | I2C init failed; telemetry stays 0 |
+| `RESET` | — | `X` received |
 
-`E,MOOD` 已删除。
+`E,MOOD` no longer exists.
 
 ---
 
-## 3. 一次典型会话
+## 3. A typical session
 
 ```
-灯:  E,BOOT,2.2.0
-电脑: G,60,1,1
-电脑: L,3
-电脑: U,0,0,1
-电脑: F,150,200,120,8,1,4,10,24,71,70,3000
-灯:  S,8,120,6,4,host,70,0
-电脑: L,88
-灯:  E,STARTLE
-灯:  S,10,118,6,61,host,15,1
-电脑: K,0
-电脑: F,8,235,190,16,3,35,60,120,45,95,600     # 换一个 look
+lamp:  E,BOOT,2.2.0
+host:  G,80,0,1
+host:  C,0,0,0,0
+host:  F,30,200,120,28,1,30,8,12,55,55,3000
+lamp:  S,8,120,6,4,host,55,0
+host:  F,30,200,186,34,1,41,12,14,62,58,120      (music started)
+host:  K,0                                        (the agent blinks)
 ...
-电脑: U,70,100,1
-（跟着鼓点）
-...
-（宿主停发，1.5 s 后）
-灯:  E,FRAME_LOST
-（缓出到琥珀呼吸）
-灯:  S,6,90,3,2,fallback,55,0
-（45 s 后开始打瞌睡）
-灯:  S,6,90,3,1,fallback,30,2
-电脑: F,...
-灯:  E,FRAME_OK
+(host stops)
+lamp:  E,FRAME_LOST
+lamp:  S,6,90,3,2,fallback,55,4
+(45 s later)
+lamp:  S,6,90,3,1,fallback,30,2
+host:  F,...
+lamp:  E,FRAME_OK
 ```
 
 ---
 
-## 4. 谁在决定画面
+## 4. Who owns the picture
 
-v2.1 是**优先级阶梯**（STARTLE > PROX > HOST > AUTONOMY），一次只有一个赢家。
-v2.2 改成**分层合成**，同时存在、各管一段：
+v2.1 had a priority ladder (STARTLE > PROX > HOST > AUTONOMY) where one winner
+took everything. v2.2 **composes layers**:
 
-| 层 | 何时生效 |
+| Layer | When |
 |---|---|
-| 兜底 look | 恒定存在的基线 |
-| 宿主 `F` | 帧新鲜（< 1.5 s），覆盖基线 |
-| `U` 音乐 | `U` 新鲜（< 1.5 s），乘/加在画面之上 |
-| `K` 瞬态 | 触发后自己走完，覆盖 `open` / 加 `flash` |
-| STARTLE | 同上，20 ms 内完成 |
+| fallback look | always the baseline |
+| host `F` | a frame arrived within 1.5 s, overriding the baseline |
+| transients (`K`) | after a trigger, until they finish |
+| startle | in the host reflex layer, sent as `K,2` + `K,1` |
 
-层级之间不竞争，所以「受惊时宿主正好在发帧」不会互相覆盖。
+They do not fight, so "the host is streaming while a startle happens" composes
+instead of one cancelling the other.
 
-兜底 look 的打瞌睡不是状态机，是两条随静默时间下调的数值曲线
-（`val` 和 `open` 各最多降 45%），所以行为是连续的。
+The fallback doze is not a state machine: it is two curves over the quiet time
+(`val` and `open` each drop up to 45%), so the behaviour is continuous.
 
 ---
 
-## 5. 链路与容错
+## 5. Link and failure handling
 
-| 情况 | 行为 |
+| Situation | Behaviour |
 |---|---|
-| 1.5 s 没有 `F`，也没有新鲜的 `M` | `E,FRAME_LOST`，3 s 缓出到兜底 look |
-| 宿主恢复发送 | `E,FRAME_OK`（只在丢失之后发一次） |
-| 12 s 没有任何字节 | `E,LINK_LOST`，立刻判宿主离线 |
-| 180 s 没有 `M` | 旧版预设过期（只影响只用 `M` 的宿主） |
-| USB 拔出 | 宿主每 2 s 重试打开；灯继续兜底运行 |
-| 行过长 / 非数字 | 整行丢弃或单字段忽略，不崩溃 |
-| 未知事件 | 宿主只记录，不处理 |
+| 1.5 s without `F`, and no fresh `M` | `E,FRAME_LOST`, 3 s ease into the fallback |
+| host sends again | `E,FRAME_OK`, once |
+| 12 s without any byte | `E,LINK_LOST`, host considered gone |
+| 180 s without `M` | the legacy preset expires (only affects `M`-only hosts) |
+| USB unplugged | the host retries every 2 s; the lamp keeps running its fallback |
+| line too long / not a number | dropped, no crash |
+| unknown event | the host only logs it |
 
-兜底策略是**缓出**，不是冻结：宿主被 `Ctrl-C` 时灯会慢慢松开到琥珀呼吸，
-而不是停在最后一帧半亮。
+The fallback **eases out**, it does not freeze: killing the host with `Ctrl-C`
+makes the lamp relax into amber breathing instead of hanging half-lit.
 
 ---
 
-## 6. 带宽
+## 6. Bandwidth
 
-| 方向 | 频率 | 每帧 | 合计 |
+| Direction | Rate | Bytes/frame | Total |
 |---|---|---|---|
-| `F` | 25 Hz | 30–45 B | ~0.9 kB/s |
-| `L` | 20 Hz | ~7 B | ~140 B/s |
-| `U` | 20 Hz | ~14 B | ~280 B/s |
-| `S` | 4 Hz | ~32 B | ~130 B/s |
-| `K` / `G` / `M` / `LID` / `C` / `R` | 事件 | 10–40 B | 忽略 |
+| `F` | 25 Hz | 30–45 | ~0.9 kB/s |
+| `S` | 4 Hz | ~32 | ~130 B/s |
+| `K` / `G` | events | 10–40 | negligible |
 
-合计约 1.4 kB/s，远低于 115200 baud 的 ~11.5 kB/s。
-
-注意 `T` 自检会阻塞 1.2 s，期间约 14 kB 会到达——流式期间不要发 `T`。
+Around 1.1 kB/s total, far below the ~11.5 kB/s of 115200 baud. The only thing
+that can overrun the line is `T`, which blocks for 1.2 s.
 
 ---
 
-## 7. 版本
+## 7. Version
 
-- 当前固件：`2.2.0`
-- 兼容：只发 `L` 和 `M` 的 v2.1 宿主可以完全不改继续跑
-- `S` 第 6 字段从心情名变成 `origin`；宿主若要显示心情，请自己记（它本来就知道）
-- 以后加字段只允许**追加在行尾**，宿主按 `len(parts) >=` 解析
+- Current firmware: `2.2.0`
+- Compatibility: a v2.1 host that only sends `L` and `M` still works
+- `S` field 5 changed from a mood name to `origin`; the host knows its own mood
+  anyway, so it does not need to read it back
+- New fields are only ever appended at the end; hosts parse with `len(parts) >=`

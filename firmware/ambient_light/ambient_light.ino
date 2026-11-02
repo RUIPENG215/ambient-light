@@ -91,8 +91,8 @@ const float SMOOTH   = 0.25f;   // audio level smoothing
 #define FB_EASE_MS            3000.0f
 #define FB_SLEEP_DIM          0.45f   // how much of val/open the quiet dims
 
-// 舵机（眼皮/百叶）。默认关闭：open 用灯光调制实现。
-// 以后把 ENABLE_SERVO 改成 1，同一个 open 参数就会驱动舵机。
+// Servo (eyelid / louver). Off by default: open is rendered by modulation.
+// Flip ENABLE_SERVO to 1 and the same open parameter drives the servo.
 #define ENABLE_SERVO          0
 #define PIN_SERVO             5
 #define LID_SERVO_CLOSED_US   1000
@@ -226,7 +226,7 @@ static const uint8_t DITHER4[4][4] = {
   {15,  7, 13,  5}
 };
 
-// ================= 前置声明 =================
+// ================= forward declarations =================
 void sendEvent(const char *name);
 void sendEvent(const char *name, const char *detail);
 int  presetIndex(const char *name);
@@ -330,7 +330,7 @@ void handleLevel(int value, uint32_t now) {
   level = constrain(value, 0, 100);
   if (level >= ACTIVITY_LEVEL) lastActivityAt = now;
 
-  // 突跳 -> 受惊. Music never comes through here, so a bass drop cannot startle.
+  // A sudden jump -> startle. Music never comes through here, so a bass drop cannot startle.
   if (reflexEnabled && level >= (int)startleLevel &&
       level - (int)shown >= STARTLE_JUMP &&
       (uint32_t)(now - lastStartleAt) > STARTLE_HOLD_MS) {
@@ -419,7 +419,7 @@ void renderFrame(uint32_t now, float sleep) {
   }
 }
 
-// ================= 传感器 =================
+// ================= sensors =================
 void serviceSensors(uint32_t now) {
   if (!sensorOk) return;
   if ((uint32_t)(now - lastSensor) < SENSOR_MS) return;
@@ -447,7 +447,7 @@ void serviceSensors(uint32_t now) {
   }
 }
 
-// ================= 串口 =================
+// ================= serial =================
 void sendEvent(const char *name) {
   Serial.print("E,");
   Serial.println(name);
@@ -668,7 +668,7 @@ void checkLink(uint32_t now) {
   }
 }
 
-// ================= 自检 =================
+// ================= self test =================
 void selfTest() {
   const uint32_t colors[4] = { 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF };
   pixels.setBrightness(gCap);
@@ -682,7 +682,7 @@ void selfTest() {
   pixels.setBrightness(255);
 }
 
-// ================= 主更新 =================
+// ================= main update =================
 void update(float dt, uint32_t now) {
   // ---- who owns the look ----
   bool streamAlive = streamSeen && (uint32_t)(now - lastStreamAt) < FRAME_TTL_MS;
@@ -784,7 +784,7 @@ void setup() {
             (LID_SERVO_OPEN_US - LID_SERVO_CLOSED_US) * (FB_OPEN / 100.0f)));
 #endif
 
-  // 保留你原来的暖橙开机色，停 400ms 再进入动画
+  // keep the warm-orange boot colour, hold it 400 ms, then start the render loop
   pixels.fill(pixels.Color(255, 70, 10));
   pixels.show();
   delay(400);

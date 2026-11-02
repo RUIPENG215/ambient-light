@@ -7,7 +7,7 @@ newline-delimited JSON.
 Request:
     {"cmd": "light", "val": 90, "ease": 2500}
     {"cmd": "blink", "kind": "blink"}
-    {"cmd": "say", "text": "暗一点"}
+    {"cmd": "say", "text": "a little darker"}
     {"cmd": "observe"}
     {"cmd": "ping"}
 

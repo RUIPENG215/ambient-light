@@ -5,7 +5,7 @@
 #   ./lamp.sh stop                      stop both
 #   ./lamp.sh status                    what is running
 #   ./lamp.sh logs                      follow both logs
-#   ./lamp.sh say "暗一点"               talk to the agent from the CLI
+#   ./lamp.sh say "a little darker"      talk to the agent from the CLI
 #
 # Closing the terminal does not stop it (nohup); use `./lamp.sh stop`.
 set -euo pipefail
@@ -51,10 +51,10 @@ case "$cmd" in
 
     sleep 1
     echo
-    echo "  网页   http://127.0.0.1:8765"
-    echo "  日志   ./lamp.sh logs"
-    echo "  说话   ./lamp.sh say \"暗一点，慢一点\""
-    echo "  停止   ./lamp.sh stop"
+    echo "  page    http://127.0.0.1:8765"
+    echo "  logs    ./lamp.sh logs"
+    echo "  talk    ./lamp.sh say \"a little darker, slower\""
+    echo "  stop    ./lamp.sh stop"
     ;;
 
   stop)

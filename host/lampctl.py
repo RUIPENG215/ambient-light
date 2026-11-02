@@ -4,7 +4,7 @@
     python3 lampctl.py observe
     python3 lampctl.py light --val 90 --ease 2500
     python3 lampctl.py light --grad 30 --wave-amp 40 --wave-hz 14
-    python3 lampctl.py say "暗一点，慢一点"
+    python3 lampctl.py say "a little darker, slower"
     python3 lampctl.py blink
 
 The socket path defaults to $AMBIENT_SOCK or /tmp/ambient-lamp.sock.

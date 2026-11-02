@@ -176,11 +176,11 @@ class TestDeepSeekAgent(unittest.TestCase):
 
     def test_a_spoken_reply_comes_back_without_tools(self):
         agent = DeepSeekAgent(
-            client_factory=lambda: FakeClient([response([], content="嗯，我暗一点。")])
+            client_factory=lambda: FakeClient([response([], content="mm, a little dimmer.")])
         )
-        turn = agent.turn({"said": "暗一点"}, self.hub)
+        turn = agent.turn({"said": "a little darker"}, self.hub)
         self.assertIsNotNone(turn)
-        self.assertEqual(turn.reply, "嗯，我暗一点。")
+        self.assertEqual(turn.reply, "mm, a little dimmer.")
         self.assertEqual(turn.actions, [])
 
     def test_observe_gets_a_second_round(self):
