@@ -60,6 +60,7 @@ Read it as four things, not three:
 | [host/audio_meter.py](host/audio_meter.py) | Microphone → calibration → 0–100 level |
 | [host/feather_link.py](host/feather_link.py) | Serial protocol, telemetry, reconnect |
 | [host/sim_feather.py](host/sim_feather.py) | Fake Feather on a pty, for testing without hardware |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Hardware and software as it runs now: processes, timing, ownership |
 | [PROTOCOL.md](PROTOCOL.md) | The serial protocol, v2.2 |
 | [FIRMWARE-API.md](FIRMWARE-API.md) | The firmware contract: frames, render math, timing |
 
