@@ -3,8 +3,12 @@
 
 Two layers, in this order:
 
-  reflex   (25 Hz)      sensors -> numbers. No network, never offline.
+  reflex   (per frame)  sensors -> numbers. No network, never offline.
   agent    (on demand)  one DeepSeek mind, writes the numbers the reflex bends.
+
+The reflex has no thread: LookEngine calls it once per frame, after easing the
+agent's target and before formatting the F frame. The engine is the only code
+that writes to the serial port after boot.
 
 The lamp is a body (firmware), a nervous system (reflex.py) and a mind
 (agent.py). The mind is optional: with no key, no network, or `--no-llm`, the

@@ -11,19 +11,30 @@ mind is a DeepSeek agent that is allowed to be offline.
 > agent (optional).
 
 ```
-microphone / music / proximity / ambient light / idle time
-        │
-        ▼
-   reflex.py          sensors -> numbers: breath depth, brightness,
-        │             openness, warmth, a startle
-        │  25 Hz, "F" frames over USB
-        ▼
-   firmware 2.2.0     50 fps; falls back to its own amber breathing if the
-        ▲             stream stops
-        │  the same eleven numbers
-   agent.py           DeepSeek, ~25 s per turn; one turn immediately when you
-                      type, and it answers in a sentence
+  you type ──► agent.py ──┐
+                          ├──► base_look  (eleven numbers: a target, not a frame)
+  lampctl light ──────────┘                 │
+                                            ▼
+                            LookEngine, 25 Hz  ◄── reflex.py reads the sensors
+                                            │     each frame: ease the target,
+                                            │     bend it with the reflex, format
+                                            ▼
+                                  F frames / K transients  (serial)
+                                            ▼
+                                  firmware 2.2.0, 50 fps
 ```
+
+Read it as four things, not three:
+
+- **agent.py** and **lampctl** both write the same target (`base_look`). The agent
+  owns it; `lampctl light` is a debug writer.
+- **reflex.py** is not a thread and never sends a frame. It is a function the
+  engine calls once per frame, which returns the bent frame plus any transient
+  commands.
+- **LookEngine** (`looks.py`) is the only code that writes to the serial port
+  after boot: it eases the target, applies the drift, runs the reflex, and sends
+  one `F` frame — plus `G` and `C,0,0,0,0` once at start.
+- **firmware** is the only thing that turns numbers into light.
 
 - **No agent, still alive.** No key, no network or `--no-llm`: the reflex keeps
   running and the lamp keeps answering sound and hands.
@@ -305,8 +316,9 @@ like*, the reflex decides *how it answers the room*.
 
 ## The reflex layer
 
-[reflex.py](host/reflex.py) runs inside the 25 Hz frame loop. It never touches
-the network, so it survives a dead API.
+[reflex.py](host/reflex.py) is one call per frame inside the 25 Hz engine. It has
+no thread of its own, never sends a frame, and never touches the network — which
+is why it survives a dead API.
 
 | Sensor | Changes | Feels like |
 |---|---|---|

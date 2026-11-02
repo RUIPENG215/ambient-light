@@ -10,16 +10,16 @@ plus a rewritten host. The previous snapshot is `SNAPSHOT-v0.9.1.md` (firmware
 > agent (optional).**
 
 ```
-sensors (sound / music / proximity / lux / idle)
-   │
-   ▼
-reflex.py        25 Hz, bends eleven numbers
-   │  F frames
-   ▼
-firmware 2.2.0   50 fps; falls back to amber breathing 1.5 s after the stream stops
-   ▲
-   │  the same eleven numbers
-agent.py         DeepSeek, ~25 s per turn
+  you type ──► agent.py ──┐
+                          ├──► base_look  (eleven numbers: a target)
+  lampctl light ──────────┘                 │
+                                            ▼
+                            LookEngine, 25 Hz  ◄── reflex.py (one call per frame)
+                                            │
+                                            ▼
+                                  F frames / K transients  (serial)
+                                            ▼
+                                  firmware 2.2.0, 50 fps
 ```
 
 Three independent layers, and any one of them can die without turning the lamp
@@ -50,7 +50,7 @@ into a brick:
 |---|---|---|
 | `host/ambient_host.py` | 600 | fast loop / music / light stream / agent loop |
 | `host/agent.py` | 652 | the one mind: six tools, drives, memory, rate limit |
-| `host/reflex.py` | 214 | sound→breath, beat→brightness, hand→open, lux→floor, idle→dim, jump→startle |
+| `host/reflex.py` | 214 | per frame: sound→breath, beat→brightness, hand→open, lux→floor, idle→dim, jump→startle |
 | `host/looks.py` | 284 | `Look` (eleven floats), the 25 Hz engine, host-side easing |
 | `host/control.py` | 267 | local socket: `light` / `blink` / `say` / `observe` |
 | `host/lampctl.py` | ~200 | CLI: change the light, talk to it, read state |
