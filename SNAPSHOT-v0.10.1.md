@@ -12,7 +12,7 @@ is history and stays in Chinese.
 |---|---|
 | **Chat replies work** | the model call used `tool_choice="required"`, so a turn that was spoken to had to answer with a tool call and returned no text — the page showed "…" forever. When `said` is present it now uses `tool_choice="auto"` and may answer with words |
 | **The agent is framed as autonomous** | the prompt opened with "you never write prose" and "you only speak when spoken to", which read like a voice switch. It now opens with "Nobody operates you… decide on your own how to look", and a message is "one more thing you noticed, not a remote control" |
-| **The lamp speaks English** | replies default to English; if the person wrote another language it matches theirs |
+| **The lamp answers in your language** | the prompt, the page and every file are English; the lamp's replies follow the language the person typed (Chinese by default) |
 | **`lamp.sh`** | one command for host + page: `start / stop / status / logs / say`. Logs go to `host/logs/`, closing the terminal no longer kills anything, `stop` also finds processes it did not start |
 | **All copy in English** | web page labels, buttons, placeholders, chat fallbacks, CLI output, log messages, code comments, and the four documents |
 | `logs/` in `.gitignore` | it is runtime output |
