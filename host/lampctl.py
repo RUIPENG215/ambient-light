@@ -19,10 +19,13 @@ import socket
 import sys
 from typing import Any
 
+from effects import EFFECTS
+
 DEFAULT_SOCKET = os.environ.get("AMBIENT_SOCK", "/tmp/ambient-lamp.sock")
 
 LIGHT_FIELDS = ("hue", "sat", "val", "grad", "wave_n", "wave_amp", "wave_hz",
-                "breath_hz", "breath_amp", "open", "ease")
+                "breath_hz", "breath_amp", "open", "ease",
+                "hue_cycles", "shape", "sparkle")
 
 
 def send(request: dict[str, Any], path: str, timeout: float = 20.0) -> dict:
@@ -51,6 +54,12 @@ def print_observe(data: dict) -> None:
         f"@ {lamp.get('hz', 0)} Hz"
         + (f"  ({lamp['reason']})" if lamp.get("reason") else "")
     )
+    effect = lamp.get("effect")
+    if effect:
+        print(
+            f"effect  {effect.get('name')}  {effect.get('t')}s / "
+            f"{effect.get('seconds')}s  intensity {effect.get('intensity')}"
+        )
     sensors = data.get("sensors", {})
     print(
         f"sensors prox={sensors.get('prox', 0):3d} lux={sensors.get('lux', 0):5.1f} "
@@ -98,10 +107,24 @@ def main(argv: list[str] | None = None) -> int:
     blink = sub.add_parser("blink", help="a transient: blink or wince")
     blink.add_argument("kind", nargs="?", choices=("blink", "wince"), default="blink")
 
+    effect = sub.add_parser("effect", help="play a named effect for a while")
+    effect.add_argument("name", choices=tuple(EFFECTS))
+    effect.add_argument("--seconds", type=float, default=None,
+                        help="how long (default: the effect's own length)")
+    effect.add_argument("--intensity", type=float, default=1.0,
+                        help="0..1, how strongly it replaces the base look")
+    sub.add_parser("stop-effect", help="stop the current effect")
+    sub.add_parser("effects", help="list the available effects")
+
     say = sub.add_parser("say", help="talk to the agent and get its answer")
     say.add_argument("text", nargs="+")
 
     args = parser.parse_args(argv)
+
+    if args.command == "effects":
+        for name, spec in EFFECTS.items():
+            print(f"{name:<10} {spec['seconds']:>4.0f}s  {spec['description']}")
+        return 0
 
     if args.command == "observe":
         request: dict[str, Any] = {"cmd": "observe"}
@@ -109,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
         request = {"cmd": "ping"}
     elif args.command == "blink":
         request = {"cmd": "blink", "kind": args.kind}
+    elif args.command == "effect":
+        request = {"cmd": "effect", "name": args.name, "intensity": args.intensity}
+        if args.seconds is not None:
+            request["seconds"] = args.seconds
+    elif args.command == "stop-effect":
+        request = {"cmd": "stop-effect"}
     elif args.command == "say":
         request = {"cmd": "say", "text": " ".join(args.text)}
     else:
@@ -141,6 +170,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"pong pid={response.get('pid', '?')}")
     elif args.command == "blink":
         print(f"ok {response.get('line')}")
+    elif args.command == "effect":
+        effect = response.get("effect") or {}
+        print(f"playing {effect.get('name')} for {effect.get('seconds')} s "
+              f"at intensity {effect.get('intensity')}")
+    elif args.command == "stop-effect":
+        print("effect stopped")
     elif args.command == "say":
         print(response.get("reply", ""))
         actions = response.get("actions") or []

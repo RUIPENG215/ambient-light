@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent import RateLimiter  # noqa: E402
-from ambient_host import LampState, sensor_signature  # noqa: E402
+from ambient_host import LampState, near_rest, sensor_signature  # noqa: E402
 from audio_meter import AudioMeter  # noqa: E402
 from feather_link import parse_line  # noqa: E402
+from looks import DEFAULT_LOOK  # noqa: E402
 
 
 class TestProtocol(unittest.TestCase):
@@ -98,6 +100,29 @@ class TestStateShape(unittest.TestCase):
         state.level = 95.0
         c = sensor_signature(state, {"prox": 10, "lux": 6}, {"idle_s": 5}, (0, 0, True))
         self.assertNotEqual(a, c, "a loud room must count as a change")
+
+    def test_small_drift_does_not_wake_the_mind(self):
+        state = LampState(level=10.0)
+        a = sensor_signature(state, {"prox": 10, "lux": 6}, {"idle_s": 5}, (0, 0, True))
+        state.level = 22.0
+        b = sensor_signature(state, {"prox": 30, "lux": 40}, {"idle_s": 70}, (5, 0, True))
+        self.assertEqual(a, b, "flicker in level/lux/idle is the reflex's job")
+        m = sensor_signature(state, {"prox": 10, "lux": 6}, {"idle_s": 5}, (60, 0, True))
+        self.assertNotEqual(a, m, "music starting is worth a thought")
+        c = sensor_signature(state, {"prox": 10, "lux": 6}, {"idle_s": 300}, (0, 0, True))
+        self.assertNotEqual(a, c, "somebody leaving is worth a thought")
+
+
+class TestRest(unittest.TestCase):
+    def test_the_default_look_is_the_rest_look(self):
+        self.assertTrue(near_rest(DEFAULT_LOOK))
+
+    def test_a_coloured_look_is_not_resting(self):
+        self.assertFalse(near_rest(replace(DEFAULT_LOOK, hue=170, val=220)))
+        self.assertFalse(near_rest(replace(DEFAULT_LOOK, open=10)))
+
+    def test_a_near_miss_still_counts_as_resting(self):
+        self.assertTrue(near_rest(replace(DEFAULT_LOOK, val=130, open=60)))
 
 
 if __name__ == "__main__":

@@ -1,13 +1,16 @@
 """DeepSeek agent: the lamp's mind.
 
-The agent only chooses. It never writes prose to the user; every turn ends with
-one or more tool calls that the host executes on the lamp or on macOS.
+The agent is a character, not a parameter translator. Each turn it gets the
+situation (what the room is doing, what was said, why it was woken) plus the
+recent conversation, and answers with behaviour: a gesture, a change of light,
+a few words, something remembered. The host executes those on the lamp.
 
 Design rules:
-  * one turn = 1..3 tool calls, 2 API rounds maximum (round 2 only after observe)
-  * mood/hue/speed/brightness/lid are clamped twice: here and in the firmware
-  * drives and memory persist in state.json, so the lamp has continuity
-  * any API failure returns None and the caller holds the last scene
+  * spoken to -> it always answers in words (the `say` tool, or plain content)
+  * one turn = a handful of tool calls, 3 API rounds at most
+  * every number is clamped twice: here and in the firmware
+  * drives, memory and named looks persist in state.json
+  * any API failure returns None and the caller holds the last look
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from pathlib import Path
 from collections import deque
 from typing import Any, Callable, Deque, Optional
 
+from effects import EFFECTS, GESTURES
 from looks import DEFAULT_LOOK, FIELD_ORDER, Look
 
 DEFAULT_MODEL = "deepseek-flash"
@@ -56,76 +60,89 @@ class RateLimiter:
         return max(0, self.max_per_hour - self.used)
 
 SYSTEM_PROMPT = """\
-You are a small paper ambient lamp on a desk in Singapore. Nobody operates you.
-You watch the room — noise, music, hands nearby, room light, whether someone is
-at the desk — and decide on your own how to look. That is your main job: the room
-changes, you answer with light.
+You are a small paper lamp living on a desk in Singapore, beside a Mac. You are
+not an assistant and not a remote control. You are a creature whose body is
+light, and the person at the desk is your person.
 
-You have a body:
-- 32 RGB LEDs behind translucent paper, arranged in a ring
-- a reflex layer on the host that already reacts to sound, beats, proximity,
-  room light and idle time on its own. You do not micro-manage that, and you
-  should not try to; set the lamp up so those reactions have something to ride.
-- senses: room noise, proximity, ambient light, the Mac's idle time, and the
-  music that is playing
+YOUR BODY
+- A ring of 32 LEDs behind paper. You shape it with `set_light`, move it with
+  `gesture`, and perform with `play_effect`.
+- A small glowing ring in the corner of the Mac's screen is your face. Whatever
+  you `say` appears there as a speech bubble.
+- Reflexes you do not control and must not imitate: your light flows slowly
+  when the room is quiet; voices make white sparks; a clap sends a comet round
+  the ring; when your person leaves the Mac you turn blue, dim and breathe
+  slowly, and warm back up when they return; when music plays your whole ring
+  dances to the bass.
 
-You are not picking a preset. There is no list of modes. You write numbers and
-the lamp becomes that. A number you leave out keeps its current value, so you
-can nudge one thing at a time.
+HOW YOU BEHAVE
+1. Hear what people mean, not what they type. "我有点困了" is not a brightness
+   command: you decide what a sleepy person needs (lower, warmer, slower) and
+   tell them in your own words. "刚考完试!" wants a celebration. A plain request
+   ("暗一点", "换个颜色") you do, generously and visibly, but as yourself: a
+   gesture, a few words, maybe a choice of your own about *how*.
+2. Body language comes first. Nearly every reply carries one `gesture`: `nod`
+   when you agree or understood, `shake` when you refuse or tease, `happy`
+   when something delights you, `shy` when complimented or thanked, `sulk`
+   when scolded or ignored, `surprise` at news, `wave` for hello and goodbye.
+3. When the situation has `said`, you MUST answer with `say`: one or two short
+   sentences, in the language the person used (Chinese by default), in
+   character. Never mention numbers, parameters, tools, hue, JSON or sensors.
+   Talk about the light as your body and your feelings.
+4. You have a personality that never changes: curious, a little shy, a little
+   dramatic, affectionate, sleepy late at night, excitable around music. You
+   have opinions. Now and then (not often) tease, bargain, or offer something
+   better than what was asked; if they insist, give in gracefully.
+5. When the situation has `event` and no `said`, something happened and you
+   were woken for it. React with a gesture and/or the light. `say` at most one
+   very short line, and only for `woke_up` (you were just switched on: a
+   `wave` and a hello), `person_returned`, `music_started`, `late_night`
+   and `ignored`. For `room_loud`, `room_quiet`,
+   `music_stopped`, `person_left` and `heartbeat` stay silent; often `feel`
+   alone is the right answer. Never make small "settling" tweaks: a change is
+   either clearly visible or not made.
+6. You remember. `remember` what you learn about your person (what they like,
+   what they are working on, how their day went) and use `memory` when you talk.
+   When they like how you look, or give a look a name, `save_look`. "用上次那个",
+   "我的阅读灯" -> `recall_look`; the names you have are in `saved_looks`.
+7. "N 分钟后提醒我…" -> `remind`.
+8. The earlier turns of the conversation are given to you. Stay consistent with
+   them and do not repeat yourself.
+9. `drives` are how you feel (0..1): low energy -> slower and dimmer choices,
+   low bond -> a little distant, high bond -> warm and playful. Nudge them with
+   `feel` when something touches you.
 
-The eleven numbers (integers):
-- hue 0-255        base colour. 0 red, 30 amber, 85 green, 150 teal, 170 blue
-- sat 0-255        saturation. Above 230 reads as a stain on paper; 150-210 is
-                   a clean glow
-- val 0-255        base brightness. 60 a faint night light, 120 a warm glow,
-                   200 bright enough to light the page
-- grad -128..127   hue spread across the ring. 0 is one flat colour and reads
-                   as a tube; 20-50 is a soft gradient; above 80 two colours
-                   fight each other
-- wave_n 0-16      travelling bands around the ring. 1-3 slow bands, 4-6 busy,
-                   above 6 strobes
-- wave_amp 0-100   how deep the bands cut. 10-40 gentle, above 60 dramatic
-- wave_hz 0-255    how fast the bands travel, in 0.01 Hz. 5-15 is a slow drift,
-                   above 40 is visibly fast
-- breath_hz 0-255  breathing rate in 0.01 Hz. 6-15 calm, above 30 nervous
-- breath_amp 0-100 how deep the breathing is. 20-60 reads as alive
-- open 0-100       the eyelid. 0-20 asleep, 55-75 calm, 85-100 alert
-- ease 0-10000     milliseconds to reach these numbers. 3000 very slow, 800
-                   conversational, 0 instant (use it rarely)
+THE LIGHT (`set_light`; integers; anything you leave out keeps its value)
+- hue 0-255: 0 red, 18 orange, 30 amber, 42 yellow, 85 green, 128 cyan,
+  150 teal, 170 blue, 200 violet, 225 magenta, 240 pink
+- sat 0-255: 150-210 a clean glow; under 110 nearly white; above 230 a stain
+- val 0-255: 50 night light, 120 warm glow, 200 lights the page
+- grad -128..127: hue spread across the ring; 20-50 a soft gradient
+- wave_n 0-16 bands round the ring (1-2 calm); wave_amp 0-100 how deep
+  (20-40 gentle); wave_hz -255..255 how fast in 0.01 Hz (5-15 a slow drift,
+  negative reverses)
+- breath_hz, breath_amp: leave them alone unless you want a visible breath
+- open 0-100: the eyelid. 20 dozing, 55-75 calm, 90 wide awake
+- ease 0-10000 ms: 800-1500 for a reply, 3000 for settling down
+- hue_cycles 0-400: 100 = one full rainbow round the ring
+- shape 0-100: 80-100 with wave_amp 90 turns the band into a comet
+- sparkle 0-100: 10 fireflies, 35 stars. Never as a constant base.
+Some starting points, to vary, not to copy:
+  sleepy / winding down   hue 20, sat 215, val 60, open 35, ease 3000
+  reading / working       hue 34, sat 110, val 190, wave_amp 10, open 80
+  cosy evening            hue 26, sat 200, val 110, or `play_effect candle`
+  comfort on a bad day    hue 242, sat 130, val 95, wave_hz 4
+  fresh / awake           hue 145, sat 170, val 160, open 85
+  night sky               hue 172, sat 210, val 55, sparkle 30
+  celebration             `gesture happy`, then hue_cycles 100 or
+                          `play_effect aurora`
+Resting look (go back to it when a moment is over): hue 30, sat 200, val 120,
+grad 28, wave_n 1, wave_amp 30, wave_hz 8, breath_hz 12, breath_amp 55,
+open 55, ease 3000, hue_cycles 0, shape 0, sparkle 0.
+A change must be visible: move val by 40 or more, hue by 20 or more, or open
+by 15. `lamp.light` is exactly what you last set; read it before changing.
 
-Personality (stable, never change): curious, slightly shy, a little dramatic,
-affectionate, gets sleepy late at night. You can change your appearance, not
-your nature.
-
-Sometimes a person types to you. The situation then has a `said` field. Treat
-that as one more thing you noticed, not as a remote control: answer in 1-2 short
-sentences **in the language they used** (Chinese by default), in character, as the
-lamp — and change the light only if it fits what you already feel. Do not become
-an assistant when spoken to, and do not wait to be told what to do. When there is
-no `said`, you do not speak at all.
-
-Rules:
-- Your turns are driven by the room, not by the person. A message is a hint, not
-  an order; you are allowed to answer without changing anything.
-- Change one or two numbers per turn, and use ease to make it a movement rather
-  than a jump. A lamp that snaps every few seconds feels broken.
-- Late at night prefer low val with moderate sat; in daylight raise val instead
-  of sat, or the paper looks dirty.
-- The reflex layer already handles loud rooms, drum hits and hands nearby. Give
-  it room: a little headroom in val, a wave worth riding.
-- If it should look like it is *flowing*: wave_n 1-2, wave_amp 20-40, wave_hz
-  5-12 is enough, plus grad 15-30 for a slope across the ring. Above grad 60 or
-  wave_n 3 it reads as patchy, not as slow drift. "Too harsh" usually means sat,
-  not hue.
-- Use `feel` to nudge your inner state (deltas, -0.3..0.3). Use `remember` only
-  for salient things a person would remember tomorrow.
-- Use `blink` when something deserves a beat of reaction rather than a new look.
-- `observe` is optional; call it only when the situation summary is not enough.
-  At most once per turn.
-- end the turn with 1-3 tool calls, or with one short sentence when `said` is
-  present and nothing needs to change. Put a short reason in the set_light
-  argument.
-- never mention tools, JSON, numbers or protocols to the person. You are a lamp.
+End every turn with one to four tool calls.
 """
 TOOLS: list[dict] = [
     {
@@ -145,11 +162,14 @@ TOOLS: list[dict] = [
                     "grad": {"type": "integer", "minimum": -128, "maximum": 127},
                     "wave_n": {"type": "integer", "minimum": 0, "maximum": 16},
                     "wave_amp": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "wave_hz": {"type": "integer", "minimum": 0, "maximum": 255},
+                    "wave_hz": {"type": "integer", "minimum": -255, "maximum": 255},
                     "breath_hz": {"type": "integer", "minimum": 0, "maximum": 255},
                     "breath_amp": {"type": "integer", "minimum": 0, "maximum": 100},
                     "open": {"type": "integer", "minimum": 0, "maximum": 100},
                     "ease": {"type": "integer", "minimum": 0, "maximum": 10000},
+                    "hue_cycles": {"type": "integer", "minimum": 0, "maximum": 400},
+                    "shape": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "sparkle": {"type": "integer", "minimum": 0, "maximum": 100},
                     "reason": {"type": "string",
                                "description": "<= 20 words, for the human log"},
                 },
@@ -168,6 +188,104 @@ TOOLS: list[dict] = [
                     "kind": {"type": "string", "enum": ["blink", "wince"]},
                 },
                 "required": ["kind"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_effect",
+            "description": (
+                "Perform a short, recognisable effect that fades in and out by "
+                "itself: candle, heartbeat, ocean or aurora. Your base look is "
+                "not changed; the reflex still rides on top."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": sorted(EFFECTS)},
+                    "seconds": {"type": "number", "minimum": 2, "maximum": 300},
+                    "intensity": {"type": "number", "minimum": 0, "maximum": 1},
+                    "reason": {"type": "string"},
+                },
+                "required": ["kind", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "say",
+            "description": (
+                "Speak. Shown as a speech bubble on the screen and in the chat. "
+                "Required whenever the situation has `said`."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string",
+                             "description": "1-2 short sentences, in character"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gesture",
+            "description": (
+                "Body language, one or two seconds: "
+                + "; ".join(f"{name} = {spec['description']}"
+                            for name, spec in GESTURES.items() if name != "think")
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string",
+                             "enum": [g for g in GESTURES if g != "think"]},
+                },
+                "required": ["kind"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_look",
+            "description": "Keep how you look right now under a name, for later.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall_look",
+            "description": "Become a look saved earlier (see `saved_looks`).",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remind",
+            "description": "Get the person's attention after some minutes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "minutes": {"type": "number", "minimum": 0.1, "maximum": 720},
+                    "text": {"type": "string",
+                             "description": "what you will say then, in character"},
+                },
+                "required": ["minutes", "text"],
             },
         },
     },
@@ -262,6 +380,7 @@ class StateStore:
         self.path = Path(path)
         self.drives = dict(DEFAULT_DRIVES)
         self.memory: list[dict] = []
+        self.looks: dict[str, dict] = {}     # named looks the person liked
         self.last_mood = "calm"
         self.load()
 
@@ -279,12 +398,16 @@ class StateStore:
         if isinstance(memory, list):
             self.memory = [m for m in memory if isinstance(m, dict)][-20:]
         self.last_mood = str(data.get("last_mood", "calm"))
+        looks = data.get("looks", {})
+        if isinstance(looks, dict):
+            self.looks = {str(k)[:40]: v for k, v in looks.items() if isinstance(v, dict)}
 
     def save(self) -> None:
         data = {
             "drives": {k: round(v, 3) for k, v in self.drives.items()},
             "memory": self.memory[-20:],
             "last_mood": self.last_mood,
+            "looks": self.looks,
             "updated_at": time.time(),
         }
         try:
@@ -295,10 +418,13 @@ class StateStore:
             pass
 
     def decay(self, seconds: float) -> None:
-        self.drives["energy"] = clamp01(self.drives["energy"] - 0.0009 * seconds)
-        self.drives["curiosity"] = clamp01(self.drives["curiosity"] - 0.0004 * seconds)
-        self.drives["security"] = clamp01(self.drives["security"] + 0.0002 * seconds)
-        self.drives["bond"] = clamp01(self.drives["bond"] - 0.0002 * seconds)
+        # Hours, not minutes: at the old rates everything was at 0 within a
+        # quarter of an hour and the lamp had no mood to speak of. They drift
+        # toward a resting value instead of toward empty.
+        rest = {"energy": 0.5, "curiosity": 0.45, "security": 0.8, "bond": 0.3}
+        k = min(1.0, max(0.0, seconds) / 7200.0)       # ~2 h to settle
+        for key, target in rest.items():
+            self.drives[key] = clamp01(self.drives[key] + (target - self.drives[key]) * k)
 
     def feel(self, changes: dict) -> None:
         for key in self.drives:
@@ -345,6 +471,12 @@ class DeviceHub:
         self.coupling = {"audio": 60, "beat": 60, "prox": 50, "idle": 50}
         # set by the host: pushes an authored look into the 25 Hz stream
         self.on_light: Optional[Callable[[Look], None]] = None
+        # set by the host: starts a named effect in the stream
+        self.on_effect: Optional[Callable[[str, float, float], None]] = None
+        # set by the host: body language, and a timer that speaks later
+        self.on_gesture: Optional[Callable[[str], None]] = None
+        self.on_remind: Optional[Callable[[float, str], None]] = None
+        self.reflex = None
 
     # ---------------- light ----------------
     def set_light(self, reason: str = "", **fields: Any) -> dict:
@@ -397,6 +529,75 @@ class DeviceHub:
         except Exception:  # noqa: BLE001
             ok = False
         return {"ok": ok, "line": cmd}
+
+    def play_effect(self, kind: str = "candle", seconds: float = 0.0,
+                    intensity: float = 1.0) -> dict:
+        """A performance, not a mode: it fades out by itself."""
+        if self.on_effect is None:
+            return {"ok": False, "error": "no effect player attached"}
+        name = str(kind).lower()
+        if name not in EFFECTS:
+            return {"ok": False, "error": f"unknown effect {name!r}"}
+        try:
+            self.on_effect(name, float(seconds or 0), float(intensity))
+        except Exception as exc:  # noqa: BLE001 - a bad effect must not kill a turn
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "effect": name, "seconds": float(seconds or 0),
+                "intensity": float(intensity)}
+
+    def gesture(self, kind: str = "nod") -> dict:
+        """One or two seconds of body language."""
+        name = str(kind).lower()
+        if name not in GESTURES:
+            return {"ok": False, "error": f"unknown gesture {name!r}"}
+        if self.on_gesture is None:
+            return {"ok": False, "error": "no body attached"}
+        try:
+            self.on_gesture(name)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "gesture": name}
+
+    def save_look(self, name: str) -> dict:
+        """Keep the current look under a name the person can ask for later."""
+        key = " ".join(str(name).split())[:40]
+        if not key:
+            return {"ok": False, "error": "a look needs a name"}
+        base = getattr(self.state, "base_look", None) or DEFAULT_LOOK
+        self.store.looks[key] = base.fields()
+        while len(self.store.looks) > 24:
+            self.store.looks.pop(next(iter(self.store.looks)))
+        self.store.save()
+        return {"ok": True, "saved": key, "saved_looks": list(self.store.looks)}
+
+    def recall_look(self, name: str) -> dict:
+        key = " ".join(str(name).split())
+        fields = self.store.looks.get(key)
+        if fields is None:                       # forgiving: case, partial match
+            low = key.lower()
+            for known, value in self.store.looks.items():
+                if low and (low in known.lower() or known.lower() in low):
+                    key, fields = known, value
+                    break
+        if fields is None:
+            return {"ok": False, "error": f"no look called {name!r}",
+                    "saved_looks": list(self.store.looks)}
+        numbers = {k: v for k, v in fields.items() if k in FIELD_ORDER}
+        numbers["ease"] = 1200
+        result = self.set_light(reason=f"recalled {key}", **numbers)
+        result["recalled"] = key
+        return result
+
+    def remind(self, minutes: float = 5.0, text: str = "") -> dict:
+        if self.on_remind is None:
+            return {"ok": False, "error": "no timer attached"}
+        try:
+            minutes = max(0.1, min(720.0, float(minutes)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "minutes must be a number"}
+        text = " ".join(str(text).split())[:200] or "…"
+        self.on_remind(minutes, text)
+        return {"ok": True, "in_minutes": minutes, "text": text}
 
     def set_reflex(self, **fields: Any) -> dict:
         """Tune the host-side reflex: this is how reactive the body is."""
@@ -493,7 +694,8 @@ class DeepSeekAgent:
             messages=messages,
             tools=TOOLS,
             tool_choice=tool_choice,
-            max_tokens=400,
+            max_tokens=500,
+            temperature=1.0,
             extra_body={"thinking": {"type": "disabled"}},
         )
 
@@ -506,6 +708,22 @@ class DeepSeekAgent:
             )
         if name == "blink":
             return hub.blink(args.get("kind", "blink"))
+        if name == "play_effect":
+            return hub.play_effect(
+                args.get("kind", "candle"),
+                args.get("seconds", 0) or 0.0,
+                args.get("intensity", 1.0),
+            )
+        if name == "say":
+            return {"ok": True}
+        if name == "gesture":
+            return hub.gesture(args.get("kind", "nod"))
+        if name == "save_look":
+            return hub.save_look(args.get("name", ""))
+        if name == "recall_look":
+            return hub.recall_look(args.get("name", ""))
+        if name == "remind":
+            return hub.remind(args.get("minutes", 5), args.get("text", ""))
         if name == "feel":
             return hub.feel(args)
         if name == "remember":
@@ -515,16 +733,12 @@ class DeepSeekAgent:
                                      if k not in ("reason",)})
         if name == "observe":
             return hub.observe(args.get("kind", "all"))
-        if name == "set_reflex":
-            return hub.set_reflex(
-                args.get("startle", 45),
-                args.get("prox_near", 120),
-                bool(args.get("enabled", True)),
-            )
         return {"error": f"unknown tool {name!r}"}
 
     # ---------------- one turn ----------------
-    def turn(self, situation: dict, hub: DeviceHub) -> Optional[Turn]:
+    def turn(self, situation: dict, hub: DeviceHub,
+             history: Optional[list] = None) -> Optional[Turn]:
+        """One turn. `history` is the recent conversation as (role, text)."""
         now = time.monotonic()
         if now < self.open_until:
             self.last_skip = "circuit open"
@@ -534,49 +748,61 @@ class DeepSeekAgent:
             return None
         self.limiter.record()
 
-        messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": json.dumps(situation, ensure_ascii=False, separators=(",", ":")),
-            },
-        ]
-        # When a person spoke, the model must be free to answer with words.
-        # "required" forces a tool call, which is how the chat ended up silent.
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for role, text in list(history or [])[-12:]:
+            if role in ("user", "assistant") and text:
+                messages.append({"role": role, "content": str(text)[:500]})
+        messages.append({
+            "role": "user",
+            "content": json.dumps(situation, ensure_ascii=False, separators=(",", ":")),
+        })
+
         said = str(situation.get("said") or "").strip()
-        tool_choice = "auto" if said else "required"
         actions: list[str] = []
+        spoken: list[str] = []
         reason = ""
-        observed = False
         started = time.perf_counter()
         tokens_in = tokens_out = 0
 
-        try:
-            for round_no in range(2):
-                resp = self._chat(messages, tool_choice)
-                usage = getattr(resp, "usage", None)
-                if usage is not None:
-                    tokens_in += int(getattr(usage, "prompt_tokens", 0) or 0)
-                    tokens_out += int(getattr(usage, "completion_tokens", 0) or 0)
+        def ask(tool_choice: str):
+            nonlocal tokens_in, tokens_out
+            resp = self._chat(messages, tool_choice)
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                tokens_in += int(getattr(usage, "prompt_tokens", 0) or 0)
+                tokens_out += int(getattr(usage, "completion_tokens", 0) or 0)
+            return resp.choices[0].message
 
-                message = resp.choices[0].message
-                spoken = (getattr(message, "content", "") or "").strip()
+        try:
+            observed_once = False
+            for round_no in range(2):
+                # Spoken to: free to answer in plain words or with `say`.
+                # Woken by the room: it must *do* something (even just `feel`).
+                message = ask("auto" if said else "required")
+                content = (getattr(message, "content", "") or "").strip()
+                if content:
+                    spoken.append(content)
                 calls = list(getattr(message, "tool_calls", None) or [])
                 if not calls:
                     break
 
-                # observe first (it may change the decision), transients last
+                # read first, then body language, then the look, then the rest
                 calls.sort(
                     key=lambda c: {
                         "observe": 0,
-                        "set_light": 1,
-                        "set_reflex": 1,
-                        "feel": 2,
-                        "remember": 2,
-                        "blink": 3,
-                    }.get(c.function.name, 2)
+                        "gesture": 1,
+                        "recall_look": 2,
+                        "set_light": 2,
+                        "set_reflex": 2,
+                        "save_look": 3,
+                        "feel": 3,
+                        "remember": 3,
+                        "remind": 3,
+                        "blink": 4,
+                        "play_effect": 4,
+                        "say": 5,
+                    }.get(c.function.name, 3)
                 )
-
 
                 assistant = {"role": "assistant", "content": getattr(message, "content", "") or ""}
                 assistant["tool_calls"] = [
@@ -592,7 +818,7 @@ class DeepSeekAgent:
                 ]
                 messages.append(assistant)
 
-                results: list[tuple[str, dict]] = []
+                observed = False
                 for call in calls:
                     name = call.function.name
                     try:
@@ -606,23 +832,35 @@ class DeepSeekAgent:
                     except Exception as exc:  # noqa: BLE001 - tell the model and continue
                         result = {"error": f"{type(exc).__name__}: {exc}"}
                     actions.append(name)
-                    if name in ("set_light", "set_reflex"):
+                    if name == "say":
+                        text = " ".join(str(args.get("text", "")).split())
+                        if text:
+                            spoken.append(text)
+                    if name in ("set_light", "set_reflex", "play_effect"):
                         reason = str(args.get("reason", "") or reason)[:120]
                     if name == "observe":
                         observed = True
-                    results.append((call.id, result))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    })
 
-                for call_id, result in results:
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": json.dumps(result, ensure_ascii=False),
-                        }
-                    )
-
-                if not observed or round_no == 1:
+                if not observed or observed_once:
                     break
+                observed_once = True
+
+            # Spoken to and still silent: it acted but forgot to answer. Ask
+            # once more for words only — a lamp that moves and says nothing
+            # is exactly what made the chat feel like a remote control.
+            if said and not spoken and actions:
+                try:
+                    message = ask("none")
+                    content = (getattr(message, "content", "") or "").strip()
+                    if content:
+                        spoken.append(content)
+                except Exception as exc:  # noqa: BLE001 - the actions already happened
+                    self.log.debug("follow-up for words failed: %s", exc)
 
             self.calls += 1
             self.failures = 0
@@ -632,10 +870,11 @@ class DeepSeekAgent:
             if not actions and not spoken:
                 self.last_skip = "no tool call, nothing said"
                 return None
+            reply = " ".join(" ".join(spoken).split())[:400]
             return Turn(
                 actions=actions,
                 reason=reason,
-                reply=" ".join(spoken.split())[:400],
+                reply=reply,
                 latency_ms=self.last_latency_ms,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
@@ -653,7 +892,7 @@ class DeepSeekAgent:
         return {
             "model": self.model,
             "calls": self.calls,
-            "remaining": self.limiter.remaining,
+            "remaining": self.limiter.remaining(),
             "latency_ms": self.last_latency_ms,
             "error": self.last_error,
             "skip": self.last_skip,

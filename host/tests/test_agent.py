@@ -110,10 +110,21 @@ class TestDeviceHub(unittest.TestCase):
 
     def test_set_light_clamps_out_of_range_numbers(self):
         self.hub.on_light = lambda look: None
-        result = self.hub.set_light(reason="x", hue=999, grad=-999, open=500)
+        result = self.hub.set_light(reason="x", hue=999, grad=-999, open=500,
+                                    hue_cycles=999, sparkle=-5)
         self.assertEqual(result["params"]["hue"], 255)
         self.assertEqual(result["params"]["grad"], -128)
         self.assertEqual(result["params"]["open"], 100)
+        self.assertEqual(result["params"]["hue_cycles"], 400)
+        self.assertEqual(result["params"]["sparkle"], 0)
+
+    def test_set_light_can_ask_for_a_rainbow_or_a_star_field(self):
+        pushed = []
+        self.hub.on_light = pushed.append
+        self.hub.set_light(reason="rainbow", hue_cycles=100, sparkle=35)
+        self.assertEqual(pushed[-1].hue_cycles, 100)
+        self.assertEqual(pushed[-1].sparkle, 35)
+        self.assertEqual(self.hub.set_light(reason="reverse", wave_hz=-30)["params"]["wave_hz"], -30)
 
     def test_set_light_twice_accumulates(self):
         self.hub.on_light = lambda look: None
@@ -130,6 +141,23 @@ class TestDeviceHub(unittest.TestCase):
         self.assertEqual(self.hub.blink()["line"], "K,0")
         self.assertEqual(self.hub.blink("wince")["line"], "K,1")
         self.assertEqual(self.state.base_look.val, DEFAULT_LOOK.val)
+
+    def test_play_effect_reaches_the_player(self):
+        played = []
+        self.hub.on_effect = lambda kind, seconds, intensity: played.append(
+            (kind, seconds, intensity))
+        result = self.hub.play_effect("candle", 20, 0.6)
+        self.assertTrue(result["ok"])
+        self.assertEqual(played, [("candle", 20.0, 0.6)])
+
+    def test_play_effect_without_a_player_says_so(self):
+        result = self.hub.play_effect("candle")
+        self.assertFalse(result["ok"])
+
+    def test_unknown_effect_is_an_error(self):
+        self.hub.on_effect = lambda *a: None
+        result = self.hub.play_effect("disco")
+        self.assertFalse(result["ok"])
 
     def test_set_reflex_tunes_the_body(self):
         class FakeReflex:
@@ -198,6 +226,54 @@ class TestDeepSeekAgent(unittest.TestCase):
         second = client.chat.completions.calls[1]["messages"]
         self.assertTrue(any(m.get("role") == "tool" and "sensors" in m.get("content", "")
                             for m in second))
+
+    def test_say_is_the_reply_and_gestures_reach_the_body(self):
+        seen = []
+        self.hub.on_gesture = seen.append
+        calls = [
+            FakeToolCall("s", "say", {"text": "好呀，我暗一点陪你。"}),
+            FakeToolCall("g", "gesture", {"kind": "nod"}),
+            FakeToolCall("l", "set_light", LIGHT_CALL),
+        ]
+        agent = DeepSeekAgent(client_factory=lambda: FakeClient([response(calls)]))
+        turn = agent.turn({"said": "我有点困了"}, self.hub)
+        self.assertEqual(turn.reply, "好呀，我暗一点陪你。")
+        self.assertEqual(seen, ["nod"])
+        self.assertEqual(turn.actions[0], "gesture", "body language comes first")
+
+    def test_acting_without_words_gets_asked_for_words(self):
+        client = FakeClient([
+            response([FakeToolCall("l", "set_light", LIGHT_CALL)]),
+            response([], content="嗯，这样好多了吧？"),
+        ])
+        agent = DeepSeekAgent(client_factory=lambda: client)
+        turn = agent.turn({"said": "暗一点"}, self.hub)
+        self.assertEqual(turn.reply, "嗯，这样好多了吧？")
+        self.assertEqual(client.chat.completions.calls[1]["tool_choice"], "none")
+
+    def test_the_conversation_is_passed_along(self):
+        client = FakeClient([response([], content="记得呀。")])
+        agent = DeepSeekAgent(client_factory=lambda: client)
+        agent.turn({"said": "还记得吗"}, self.hub,
+                   [("user", "我叫小王"), ("assistant", "你好小王")])
+        roles = [m["role"] for m in client.chat.completions.calls[0]["messages"]]
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])
+
+    def test_a_named_look_can_be_saved_and_recalled(self):
+        self.hub.set_light(reason="reading", hue=34, val=190)
+        self.assertTrue(self.hub.save_look("阅读灯")["ok"])
+        self.hub.set_light(reason="night", hue=170, val=50)
+        result = self.hub.recall_look("阅读")
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.state.base_look.val, 190)
+        self.assertFalse(self.hub.recall_look("不存在")["ok"])
+
+    def test_drives_settle_instead_of_emptying(self):
+        self.store.drives.update(energy=0.9, bond=0.9)
+        self.store.decay(900)            # a quarter of an hour
+        self.assertGreater(self.store.drives["energy"], 0.8)
+        self.store.decay(86400)
+        self.assertAlmostEqual(self.store.drives["energy"], 0.5, delta=0.01)
 
     def test_bad_tool_arguments_do_not_kill_the_turn(self):
         calls = [FakeToolCall("x", "set_light", "{not json")]

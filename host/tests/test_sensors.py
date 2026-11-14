@@ -42,7 +42,9 @@ class TestSituation(unittest.TestCase):
             sensors={"prox": 5, "near": False, "lux": 12, "energy": 2, "mood": "calm", "lid": 70},
             mac={"idle_s": 5, "user_present": True, "playing": False, "title": "", "artist": ""},
             music=(20, 0, True),
-            lamp={"mood": "calm", "since_s": 5, "lid": 70, "coupling": {}},
+            lamp={"light": {"hue": 24, "val": 90, "open": 60},
+                  "reason": "the room went quiet", "for_s": 12,
+                  "effect": {"name": "candle", "t": 3, "seconds": 45}},
             drives={"energy": 0.7, "curiosity": 0.5, "security": 0.8, "bond": 0.3},
             memory=[{"t": "10:00", "text": "hello", "salience": 0.5}],
             events=["WAKE 3s ago"],
@@ -50,7 +52,11 @@ class TestSituation(unittest.TestCase):
         )
         self.assertEqual(situation["music"]["energy"], 20)
         self.assertTrue(situation["presence"]["user_present"])
-        self.assertEqual(situation["lamp"]["lid"], 70)
+        self.assertEqual(situation["lamp"]["light"]["hue"], 24)
+        self.assertEqual(situation["lamp"]["light"]["val"], 90)
+        self.assertEqual(situation["lamp"]["for_s"], 12)
+        self.assertEqual(situation["lamp"]["reason"], "the room went quiet")
+        self.assertEqual(situation["lamp"]["effect"]["name"], "candle")
         self.assertEqual(len(situation["memory"]), 1)
 
 

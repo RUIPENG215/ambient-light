@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Ambient Lamp</string>
+  <key>CFBundleDisplayName</key><string>Ambient Lamp</string>
+  <key>CFBundleIdentifier</key><string>sg.nus.id5402.ambientlamp</string>
+  <key>CFBundleVersion</key><string>1.0.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>AmbientLamp</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>The lamp listens to how loud the room is so it can react to voices and claps. Only loudness numbers are used; no audio is recorded or sent anywhere.</string>
+  <key>NSAppleEventsUsageDescription</key><string>The lamp asks Music or Spotify what is playing.</string>
+</dict>
+</plist>

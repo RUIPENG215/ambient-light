@@ -127,7 +127,7 @@ class LevelBeatDetector:
     """Fallback when there is no BlackHole: onsets from the mic dB stream."""
 
     def __init__(self) -> None:
-        self._hist: Deque[tuple[float, float]] = deque(maxlen=60)
+        self._hist: Deque[tuple[float, float]] = deque(maxlen=160)
         self._last_beat = 0.0
         self.energy = 0.0
         self.beat = 0.0
@@ -167,6 +167,15 @@ class BeatDetector:
         self._window = np.hanning(blocksize)
         freqs = np.fft.rfftfreq(blocksize, 1.0 / samplerate)
         self._low = (freqs >= 25.0) & (freqs <= 150.0)
+        self._high = (freqs >= 2500.0) & (freqs <= 10000.0)
+        # Continuous envelopes for the light to dance to, 0..1. Each is the
+        # band's energy *above its own recent average*, scaled by its recent
+        # peak, so a sustained bass line does not hold the lamp bright and
+        # every kick still lands. Instant attack, ~0.1 s release.
+        self.bass = 0.0
+        self.treble = 0.0
+        self._band = {"lo": [0.0, 1e-6], "hi": [0.0, 1e-6]}   # [avg, peak]
+        self._tail = np.zeros(blocksize - blocksize // 2)
         self._prev: Optional[np.ndarray] = None
         self._flux: Deque[float] = deque(maxlen=80)
         self._rms: Deque[float] = deque(maxlen=200)
@@ -174,6 +183,20 @@ class BeatDetector:
         self._lock = threading.Lock()
         self.energy = 0.0
         self.beat = 0.0
+        # An onset lasts one 21 ms block; anything polling slower than that
+        # would miss most kicks, so the time of the last one is kept as well.
+        self.last_beat_at = -1e9
+        # Absolute loudness of the tap, 0..1. `energy` is relative to the last
+        # few seconds, so it sinks toward 0 during steady music; this does not.
+        self.loud = 0.0
+        self.db = -180.0
+
+    def _punch(self, band: str, mags: np.ndarray, db: float) -> float:
+        return _band_punch(self._band[band], mags, db)
+
+    def beat_recent(self, hold_s: float = 0.06) -> float:
+        """1.0 if an onset happened within the last `hold_s` seconds."""
+        return 1.0 if time.monotonic() - self.last_beat_at <= hold_s else 0.0
 
     def push(self, samples: np.ndarray) -> tuple[float, float]:
         x = np.asarray(samples, dtype=np.float64).reshape(-1)
@@ -186,11 +209,26 @@ class BeatDetector:
         db = 20.0 * math.log10(max(rms, 1e-9))
 
         with self._lock:
+            self.db = db
+            target = max(0.0, min(1.0, (db + 55.0) / 40.0))   # -55 dBFS..-15 dBFS
+            self.loud += (target - self.loud) * (0.5 if target > self.loud else 0.08)
             self._rms.append(db)
             floor = float(np.percentile(self._rms, 20)) if len(self._rms) >= 10 else db
             energy = max(0.0, min(1.0, (db - floor) / 26.0))
 
-            spec = np.abs(np.fft.rfft(x * self._window))[self._low]
+            full = np.abs(np.fft.rfft(x * self._window))
+            spec = full[self._low]
+            # A second, half-block-shifted window: a kick that straddles two
+            # blocks is halved by the Hann window otherwise, so every other
+            # kick would land weak.
+            half = self.blocksize // 2
+            mid = np.abs(np.fft.rfft(np.concatenate((self._tail, x[:half])) * self._window))
+            self._tail = x[half:].copy()
+            lo = max(self._punch("lo", mid[self._low], db), self._punch("lo", spec, db))
+            hi = max(self._punch("hi", mid[self._high], db),
+                     self._punch("hi", full[self._high], db))
+            self.bass = max(lo, self.bass * 0.80)
+            self.treble = max(hi, self.treble * 0.70)
             if self._prev is not None and spec.shape == self._prev.shape:
                 flux = float(np.sum(np.maximum(0.0, spec - self._prev)))
             else:
@@ -206,8 +244,24 @@ class BeatDetector:
                 if flux > threshold and flux > 1e-6 and now - self._last_beat > 0.12:
                     beat = 1.0
                     self._last_beat = now
+                    self.last_beat_at = now
             self.energy, self.beat = energy, beat
             return energy, beat
+
+
+def _band_punch(state: list, mags: np.ndarray, db: float) -> float:
+    """How far this block's band energy stands above its recent average."""
+    e = float(np.sqrt(np.mean(mags * mags))) if mags.size else 0.0
+    avg, peak = state
+    avg += (e - avg) * 0.02                 # ~0.5 s average (two calls a block)
+    peak = max(e, peak * 0.99925, 1e-6)     # ~14 s memory of "loud"
+    state[0], state[1] = avg, peak
+    if db < -60.0:                          # the tap is silent
+        return 0.0
+    span = peak - avg
+    if span <= 1e-9:
+        return 0.0
+    return max(0.0, min(1.0, (e - avg) / span))
 
 
 class SystemAudio:
@@ -306,11 +360,13 @@ class SensorHub:
     def music_bus(self) -> tuple[int, int, bool]:
         """Returns (energy 0..100, beat 0..100, user_present)."""
         now = time.monotonic()
-        if now - self._music_at < 0.05:
+        if now - self._music_at < 0.015:
             return self._music
         if self.system is not None and self.system.available:
-            energy = self.system.detector.energy
-            beat = self.system.detector.beat
+            # the tap is digital: silence is exactly silent, so the absolute
+            # level says "music is playing" without any calibration
+            energy = self.system.detector.loud
+            beat = self.system.detector.beat_recent()
         else:
             energy, beat = self._mic_beat.update(self.meter.db)
         present = self.mac.user_present()
@@ -383,10 +439,13 @@ def build_situation(
         },
         "light_lux": int(sensors.get("lux", 0)),
         "lamp": {
-            "mood": lamp.get("mood", "calm"),
-            "since_s": int(lamp.get("since_s", 0)),
-            "lid": int(lamp.get("lid", 70)),
-            "coupling": lamp.get("coupling", {}),
+            # The fourteen numbers this mind last wrote, so "a little darker"
+            # is a relative move rather than a guess. `for_s` is how long the
+            # current look has been on the wire.
+            "light": dict(lamp.get("light") or {}),
+            "reason": str(lamp.get("reason", ""))[:120],
+            "for_s": int(lamp.get("for_s", 0)),
+            "effect": lamp.get("effect"),
         },
         "drives": {k: round(float(v), 2) for k, v in drives.items()},
         "memory": list(memory)[-6:],

@@ -32,19 +32,33 @@ class TestLookWire(unittest.TestCase):
         parts = line.split(",")
         self.assertEqual(parts[0], "F")
         self.assertEqual(len(parts) - 1, len(FIELD_ORDER))
+        self.assertEqual(len(FIELD_ORDER), 14)
         self.assertTrue(all(p.lstrip("-").isdigit() for p in parts[1:]))
+        self.assertLess(len(line.encode("ascii")) + 1, 80,
+                        "a full 14-field frame must fit the 80-byte line limit")
 
     def test_values_are_clamped_not_rejected(self):
         wild = Look(hue=999, sat=-5, val=300, grad=-999, wave_n=99,
-                    open=500, ease=99999)
+                    wave_hz=-999, open=500, ease=99999,
+                    hue_cycles=999, shape=-5, sparkle=999)
         fields = wild.fields()
         self.assertEqual(fields["hue"], 255)
         self.assertEqual(fields["sat"], 0)
         self.assertEqual(fields["val"], 255)
         self.assertEqual(fields["grad"], -128)
         self.assertEqual(fields["wave_n"], 16)
+        self.assertEqual(fields["wave_hz"], -255)
         self.assertEqual(fields["open"], 100)
         self.assertEqual(fields["ease"], 10000)
+        self.assertEqual(fields["hue_cycles"], 400)
+        self.assertEqual(fields["shape"], 0)
+        self.assertEqual(fields["sparkle"], 100)
+
+    def test_the_new_basis_defaults_to_the_old_renderer(self):
+        fields = DEFAULT_LOOK.fields()
+        self.assertEqual(fields["hue_cycles"], 0)
+        self.assertEqual(fields["shape"], 0)
+        self.assertEqual(fields["sparkle"], 0)
 
     def test_motion_only_touches_the_fields_it_should(self):
         look = replace(replace(DEFAULT_LOOK, hue=100, hue_drift=6.0), hue=250.0, hue_drift=10.0)
@@ -125,6 +139,21 @@ class TestLookEngine(unittest.TestCase):
         vals = [int(line.split(",")[3]) for line in link.frames()]
         self.assertLess(max(vals), 200, "3000 ms ease must still be climbing")
         self.assertGreater(max(vals), 120, "but it must have started moving")
+
+    def test_an_effect_reaches_the_wire(self):
+        link = FakeLink()
+        engine = LookEngine(link, hz=25.0)
+        engine.start("ember", DEFAULT_LOOK)
+        engine.set_effect("candle", seconds=5.0, intensity=1.0)
+        time.sleep(0.7)
+        status = engine.status()["effect"]
+        engine.stop()
+
+        self.assertEqual(status["name"], "candle")
+        vals = [int(line.split(",")[3]) for line in link.frames()]
+        self.assertTrue(vals)
+        self.assertGreater(max(vals) - min(vals), 0,
+                           "a candle must actually flicker on the wire")
 
     def test_stop_is_idempotent(self):
         engine = LookEngine(FakeLink())

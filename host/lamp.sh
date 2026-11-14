@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # One command for the whole lamp: host + web page, logs in ./logs/.
 #
+#   ./lamp.sh app                       everything in one process + the corner pet
 #   ./lamp.sh start [extra host args]   start both, print the URL
 #   ./lamp.sh stop                      stop both
 #   ./lamp.sh status                    what is running
 #   ./lamp.sh logs                      follow both logs
 #   ./lamp.sh say "a little darker"      talk to the agent from the CLI
+#   ./lamp.sh effect candle --seconds 60  play a named effect
+#   ./lamp.sh effects                    list the effects
 #
 # Closing the terminal does not stop it (nohup); use `./lamp.sh stop`.
 set -euo pipefail
@@ -100,14 +103,21 @@ case "$cmd" in
     tail -n 30 -f logs/host.log logs/webchat.log
     ;;
 
-  say|light|blink|observe|ping)
+  app)
+    # the whole thing in one process, with the corner window
+    # shellcheck disable=SC1091
+    source .venv/bin/activate
+    exec python3 lamp_app.py "$@"
+    ;;
+
+  say|light|blink|observe|ping|effect|stop-effect|effects)
     # shellcheck disable=SC1091
     source .venv/bin/activate
     exec python3 lampctl.py "$cmd" "$@"
     ;;
 
   *)
-    echo "usage: ./lamp.sh [start|stop|status|logs|say|light|blink|observe]" >&2
+    echo "usage: ./lamp.sh [start|stop|status|logs|say|light|blink|observe|effects|effect|stop-effect]" >&2
     exit 2
     ;;
 esac

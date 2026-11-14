@@ -1,4 +1,4 @@
-# Serial protocol — Interactive Ambient Light v2.2
+# Serial protocol — Interactive Ambient Light v2.2.2
 
 Everything between the host (the computer) and the Feather nRF52840 Sense goes
 over one USB CDC serial line. The protocol is **line oriented** ASCII: one frame
@@ -10,7 +10,7 @@ per line, terminated by `\n`, fields separated by commas.
 - Unknown commands and events are ignored, never fatal, so fields can be added later
 
 ```
-host   --F / K / G / P / T / X-->  Feather
+host   --F / K / G / B / P / T / X-->  Feather
 Feather  --S / E / PONG-->  host
 ```
 
@@ -20,11 +20,28 @@ describes the look with `F` frames at 20–30 Hz. The v2.1 commands (`L`, `M`,
 `LID`, `U`, `C`, `R`) are still accepted for compatibility but **the host no
 longer sends them**. Design rationale in [FIRMWARE-API.md](FIRMWARE-API.md).
 
+**What changed in v2.2.1.** The firmware can turn three opaque blades inside the
+ring with three servos, but the feature is **compiled out by default**
+(`ENABLE_SERVO 0`) until 180° positional servos are fitted — the delivered ones
+are 360° continuous rotation. When enabled, nothing on the wire changes for the
+host: `open` in the `F` frame drives the blades, and `K`/`LID` transients still
+work. The only addition is `B`, a calibration command for the serial monitor —
+end points are mechanical, so they are set per servo and are not persisted (like
+`G`). With the feature off, `open` is the old brightness gain and `B` still
+reports its (unused) values.
+
+**What changed in v2.2.2.** Three fields were appended to `F` — `hue_cycles`,
+`shape`, `sparkle` — and `wave_hz` became signed. They are additions, not a
+rewrite: a host that still sends eleven fields gets exactly the v2.2 renderer
+(missing fields keep their previous value, which starts at 0). The reason is the
+one the v2.2 rewrite was built on: the board should be a *tool*, not a menu, and
+the tool's basis was too narrow to express a rainbow, a comet or a star field.
+
 ---
 
 ## 1. Host → lamp
 
-### `F,<hue>,<sat>,<val>,<grad>,<wave_n>,<wave_amp>,<wave_hz>,<breath_hz>,<breath_amp>,<open>,<ease_ms>` — the look
+### `F,<hue>,<sat>,<val>,<grad>,<wave_n>,<wave_amp>,<wave_hz>,<breath_hz>,<breath_amp>,<open>,<ease_ms>,<hue_cycles>,<shape>,<sparkle>` — the look
 
 | Field | Range | Unit | Meaning |
 |---|---|---|---|
@@ -34,18 +51,23 @@ longer sends them**. Design rationale in [FIRMWARE-API.md](FIRMWARE-API.md).
 | `grad` | −128…127 | hue | hue spread across the ring; 0 is one flat colour |
 | `wave_n` | 0–16 | waves | travelling bands around the ring; 0 disables |
 | `wave_amp` | 0–100 | % | depth of those bands |
-| `wave_hz` | 0–255 | 0.01 Hz | how fast they travel |
+| `wave_hz` | −255…255 | 0.01 Hz | speed and direction; negative travels the other way |
 | `breath_hz` | 0–255 | 0.01 Hz | breathing rate |
 | `breath_amp` | 0–100 | % | breathing depth |
-| `open` | 0–100 | % | eyelid; without a servo it is a brightness gain |
+| `open` | 0–100 | % | eyelid: the three blades' arc (brightness gain when servos are off) |
 | `ease_ms` | 0–10000 | ms | time constant to reach this frame; 0 = immediately |
+| `hue_cycles` | 0–400 | 0.01 turns | full hue turns around the ring; 100 = one rainbow, 200 = two |
+| `shape` | 0–100 | — | 0 keeps the wave a sine; 100 sharpens it into a narrow comet band |
+| `sparkle` | 0–100 | % | density of random white glints (stars, fireflies, embers) |
 
 ```
-F,150,220,180,20,2,30,40,10,40,80,600
+F,150,220,180,20,2,30,40,10,40,80,600,0,0,0
 ```
 
-- Rate: **20–30 Hz**, 25 Hz recommended. A frame is 30–45 bytes, about 0.9 kB/s
-- **Missing fields keep their previous value**; out-of-range values are clamped
+- Rate: **20–30 Hz**, 25 Hz recommended. A full frame is about 58 bytes, ~1.4 kB/s
+- **Missing fields keep their previous value**; out-of-range values are clamped.
+  The first eleven fields are v2.2; `hue_cycles`, `shape` and `sparkle` were
+  appended in v2.2.2, so an older board ignores them and still gets the old look.
 - A frame with no valid number does not refresh the frame clock
 - `F` produces **no events**; it is safe to stream continuously
 - 1.5 s without a frame (and without a fresh `M`) → ease into the fallback look (§5)
@@ -79,12 +101,37 @@ K,2,200
 | `dither` | 0/1 | 1 | temporal dither, only above a channel value of 8 |
 
 `gamma` defaults to 0 on purpose: after `val`, the breathing envelope and the
-openness gain, channel values often sit around 10–30, and a 2.2 curve pushes
-them to 1–3, where one code step is a doubling and the lamp visibly flickers.
-Gamma is an experiment, not the default.
+openness gain (when servos are off), channel values often sit around 10–30, and
+a 2.2 curve pushes them to 1–3, where one code step is a doubling and the lamp
+visibly flickers. Gamma is an experiment, not the default.
 
-Power at 32 LEDs full white: `cap` 40 → 0.30 A, 60 → 0.45 A, 80 → 0.60 A. Above
-60 needs the external supply. Not persisted; send it once per connection.
+Power at 32 LEDs full white: `cap` 40 → 0.30 A, 60 → 0.45 A, 80 → 0.60 A,
+120 → 0.90 A, 160 → 1.2 A. The host now sends **120** (more headroom for
+`val`/breathing without going near the supply limit); 80 is the old default and
+60 is the firmware's own. Not persisted; send it once per connection.
+
+### `B[,<servo>,<closed_us>,<open_us>]` — blade calibration (v2.2.1)
+
+| Field | Range | Meaning |
+|---|---|---|
+| `servo` | 1–3 | which blade, in the order D11, D9, D10 |
+| `closed_us` | 1000–2000 | pulse width with the blade covering its sector |
+| `open_us` | 1000–2000 | pulse width with the blade clear of the LEDs |
+
+- With no arguments, `B` reports all three: three `E,BLADE,<servo>,<closed>,<open>`
+  lines.
+- With arguments it sets one servo's end points, moves that blade to the current
+  `open` immediately, and echoes the result.
+- Swap `closed_us` and `open_us` to invert a blade whose horn is mounted the
+  other way round.
+- Not persisted; the compile-time defaults are in the sketch. `open` and the
+  `K` transients are unchanged — this only teaches the firmware where the
+  mechanical end points are.
+
+```
+B,2,1500,1700      # blade 2: 1500 us closed, 1700 us open
+B                  # report all three
+```
 
 ### `L,<level>` — room noise (v2.1, still accepted)
 
@@ -156,8 +203,11 @@ S,12,345,8,43,host,70,0
 
 | Event | Detail | Meaning |
 |---|---|---|
-| `BOOT` | firmware version | e.g. `E,BOOT,2.2.0` |
+| `BOOT` | firmware version | e.g. `E,BOOT,2.2.2` |
 | `CMD` | preset | a legacy `M` was accepted |
+| `BLADE` | `<servo>,<closed_us>,<open_us>` | one blade's calibration, after `B` |
+| `SERVO_OK` | `<servo>,<pin>` | boot: that blade's servo attached to the pin |
+| `SERVO_FAIL` | `<servo>` | boot: `attach()` failed, no PWM channel for that pin |
 | `STARTLE` | — | the firmware's own startle (only when it receives `L`) |
 | `WAKE` | `prox` | fallback mode, dozing, woken by a hand |
 | `FRAME_LOST` | — | 1.5 s without `F`/`M`, easing into the fallback |
@@ -174,7 +224,7 @@ S,12,345,8,43,host,70,0
 ## 3. A typical session
 
 ```
-lamp:  E,BOOT,2.2.0
+lamp:  E,BOOT,2.2.2
 host:  G,80,0,1
 host:  C,0,0,0,0
 host:  F,30,200,120,28,1,30,8,12,55,55,3000
@@ -189,6 +239,14 @@ lamp:  S,6,90,3,2,fallback,55,4
 lamp:  S,6,90,3,1,fallback,30,2
 host:  F,...
 lamp:  E,FRAME_OK
+```
+
+A calibration break, from the serial monitor (with the host stopped — its `F`
+stream would immediately override the position you are testing):
+
+```
+B                       # E,BLADE,1,1450,1650 then 2, then 3
+B,2,1500,1700           # E,BLADE,2,1500,1700
 ```
 
 ---
@@ -234,19 +292,22 @@ makes the lamp relax into amber breathing instead of hanging half-lit.
 
 | Direction | Rate | Bytes/frame | Total |
 |---|---|---|---|
-| `F` | 25 Hz | 30–45 | ~0.9 kB/s |
+| `F` | 25 Hz | 40–58 (14 fields) | ~1.4 kB/s |
 | `S` | 4 Hz | ~32 | ~130 B/s |
 | `K` / `G` | events | 10–40 | negligible |
 
-Around 1.1 kB/s total, far below the ~11.5 kB/s of 115200 baud. The only thing
+Around 1.6 kB/s total, far below the ~11.5 kB/s of 115200 baud. The only thing
 that can overrun the line is `T`, which blocks for 1.2 s.
 
 ---
 
 ## 7. Version
 
-- Current firmware: `2.2.0`
-- Compatibility: a v2.1 host that only sends `L` and `M` still works
+- Current firmware: `2.2.2` (`F` grew to 14 fields, `wave_hz` signed; blades on
+  D11/D9/D10 and `B` from v2.2.1)
+- Compatibility: a v2.1 host that only sends `L` and `M` still works, a v2.2
+  host that sends 11 fields still works, and a 14-field host on older firmware
+  is safe because unknown trailing fields are ignored
 - `S` field 5 changed from a mood name to `origin`; the host knows its own mood
   anyway, so it does not need to read it back
 - New fields are only ever appended at the end; hosts parse with `len(parts) >=`

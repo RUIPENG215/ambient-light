@@ -90,8 +90,12 @@ static bool near(float a, float b, float tol) { return std::fabs(a - b) <= tol; 
 
 int main() {
   setup();
-  check(saw("E,BOOT,2.2.0"), "boot event carries 2.2.0");
+  check(saw("E,BOOT,2.2.2"), "boot event carries 2.2.2");
   check(!saw("E,SENSOR_FAIL"), "APDS9960 initialises");
+#if ENABLE_SERVO
+  check(saw("E,SERVO_OK,1,11") && saw("E,SERVO_OK,2,9") &&
+        saw("E,SERVO_OK,3,10"), "boot reports the three blade pins");
+#endif
   clearOut();
 
   // ---------------- quiet / fallback ----------------
@@ -159,6 +163,54 @@ int main() {
   feed("F,abc\n");
   stepFor(40);
   check(lastStreamAt == streamAt, "malformed F does not refresh the stream");
+
+  // ---------------- v2.2.2 basis: hue_cycles / shape / sparkle ----------------
+  feed("G,80,0,0\n");                       // dither off, so renders compare
+  feed("F,30,200,100,0,1,90,0,0,0,100,0,0,0,0\n");
+  stepFor(40);
+  check(near(lookTarget[P_HUE_CYCLES], 0, 0.01f) &&
+        near(lookTarget[P_SHAPE], 0, 0.01f) &&
+        near(lookTarget[P_SPARKLE], 0, 0.01f),
+        "the three appended fields parse");
+
+  wavePhase = 0.0f;
+  stepFor(40);
+  int wide = renderOut[4];
+  feed("F,30,200,100,0,1,90,0,0,0,100,0,0,100,0\n");
+  stepFor(40);
+  int sharp = renderOut[4];
+  check(sharp < wide, "shape 100 turns a sine into a narrow comet band");
+
+  feed("F,30,200,100,0,1,90,-40,0,0,100,0,100,0,0\n");
+  stepFor(40);
+  check(near(lookTarget[P_WAVE_HZ], -40, 0.01f) &&
+        near(lookTarget[P_HUE_CYCLES], 100, 0.01f),
+        "negative wave_hz reverses the flow; hue_cycles parses");
+
+  feed("F,30,200,100,0,1,90,0,0,0,100,0,999,999,-5\n");
+  stepFor(40);
+  check(near(lookTarget[P_HUE_CYCLES], 400, 0.01f) &&
+        near(lookTarget[P_SHAPE], 100, 0.01f) &&
+        near(lookTarget[P_SPARKLE], 0, 0.01f),
+        "the new fields are clamped, not rejected");
+
+  feed("F,60\n");
+  stepFor(40);
+  check(near(lookTarget[P_HUE_CYCLES], 400, 0.01f) &&
+        near(lookTarget[P_WAVE_HZ], 0, 0.01f),
+        "an old 11-field frame keeps the new fields");
+
+  feed("F,30,200,80,0,0,0,0,0,0,50,0,0,0,100\n");
+  stepFor(600);
+  int lit = 0;
+  for (uint8_t i = 0; i < LED_COUNT; i++) if (spark[i] > 0.0f) lit++;
+  check(lit > 0, "sparkle ignites random pixels");
+
+  feed("F,30,200,80,0,0,0,0,0,0,50,0,0,0,0\n");
+  stepFor(1200);
+  int left = 0;
+  for (uint8_t i = 0; i < LED_COUNT; i++) if (spark[i] > 0.0f) left++;
+  check(left == 0, "sparks decay away when sparkle returns to 0");
   clearOut();
 
   // ---------------- streaming is quiet ----------------
@@ -356,6 +408,52 @@ int main() {
   stepFor(40);
   check(origin == ORIGIN_HOST, "F after X takes over again");
   check(saw("E,FRAME_OK"), "recovering from a frame loss reports FRAME_OK");
+
+  // ---------------- blades: three servos ----------------
+#if ENABLE_SERVO
+  check(SERVO_COUNT == 3 && blades[0].attached && blades[1].attached &&
+        blades[2].attached, "three blades are attached");
+  check(blades[0].pin == SERVO_PIN[0] && blades[1].pin == SERVO_PIN[1] &&
+        blades[2].pin == SERVO_PIN[2], "each blade has its own pin");
+
+  feed("F,30,200,120,6,1,5,3,12,55,100,0\n");
+  stepFor(60);
+  check(blades[0].us == (int)servoOpenUs[0] &&
+        blades[1].us == (int)servoOpenUs[1] &&
+        blades[2].us == (int)servoOpenUs[2], "open 100 turns all three blades open");
+
+  feed("F,30,200,120,6,1,5,3,12,55,0,0\n");
+  stepFor(60);
+  check(blades[0].us == (int)servoClosedUs[0] &&
+        blades[1].us == (int)servoClosedUs[1] &&
+        blades[2].us == (int)servoClosedUs[2], "open 0 turns all three blades closed");
+
+  int writesBefore = blades[0].writes;
+  stepFor(200);
+  check(blades[0].writes == writesBefore,
+        "a settled blade is not rewritten every frame");
+
+  int arc = (int)servoOpenUs[0] - (int)servoClosedUs[0];
+  if (arc < 0) arc = -arc;
+  check(arc <= 400, "the blade arc stays small (<= 400 us)");
+
+  check(gOpenGain == 1.0f, "blades do the occluding, the light is not dimmed");
+
+  // calibration is live, and reports what it accepted
+  feed("B,2,1500,1700\n");
+  stepFor(40);
+  check(servoClosedUs[1] == 1500 && servoOpenUs[1] == 1700,
+        "B sets one blade's end points");
+  check(saw("E,BLADE,2,1500,1700"), "B echoes the new calibration");
+  feed("B\n");
+  stepFor(40);
+  check(countOf("E,BLADE,") >= 4, "B with no arguments reports all three blades");
+  feed("B,2,1450,1650\n");
+  stepFor(40);
+  clearOut();
+#else
+  check(true, "servos are disabled at compile time");
+#endif
 
   // ---------------- robustness ----------------
   feed("PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP"

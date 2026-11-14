@@ -12,9 +12,13 @@
  *
  * Host -> board
  *   F,<hue>,<sat>,<val>,<grad>,<wave_n>,<wave_amp>,<wave_hz>,
- *     <breath_hz>,<breath_amp>,<open>,<ease_ms>    look frame, 20-30 Hz
+ *     <breath_hz>,<breath_amp>,<open>,<ease_ms>,
+ *     <hue_cycles>,<shape>,<sparkle>               look frame, 20-30 Hz
+ *     (wave_hz is signed; the last three were appended in v2.2.2)
  *   K,<type>[,<strength>]                         0 blink 1 wince 2 flash
  *   G,<cap>,<gamma>,<dither>                      render config
+ *   B,<servo>,<closed_us>,<open_us>               blade end points (v2.2.1)
+ *   B                                            report the three blades
  *   L,<0-100>                                     noise level, 20 Hz
  *   M,<preset>,<hue>,<speed>,<bright>,<lid>       legacy preset shorthand
  *   LID,<open>,<ms>,<mode>[,<amp>,<period>]       legacy eyelid alias
@@ -25,8 +29,8 @@
  *
  * Board -> host
  *   S,<prox>,<als>,<lux>,<energy>,<origin>,<open>,<flags>   telemetry, 4 Hz
- *   E,<event>[,<detail>]   BOOT STARTLE WAKE CMD FRAME_LOST FRAME_OK
- *                          LINK_LOST LINK_OK SENSOR_FAIL RESET
+ *   E,<event>[,<detail>]   BOOT STARTLE WAKE CMD BLADE SERVO_OK SERVO_FAIL
+ *                          FRAME_LOST FRAME_OK LINK_LOST LINK_OK SENSOR_FAIL RESET
  *
  * Layering (high -> low, they compose, they do not fight):
  *   startle flash / transients > K > U music > F frame > fallback look
@@ -46,7 +50,7 @@ const bool  BAR_MODE = false;   // false: whole ring; true: level bar
 const float SMOOTH   = 0.25f;   // audio level smoothing
 
 // ================= timing / behaviour =================
-#define FW_VERSION            "2.2.0"
+#define FW_VERSION            "2.2.2"
 
 #define FRAME_MS              20      // 50 fps render
 #define SENSOR_MS             100     // APDS9960 10 Hz
@@ -78,29 +82,66 @@ const float SMOOTH   = 0.25f;   // audio level smoothing
 #define FLASH_TAU_S           0.28f
 
 // ---- fallback look: what the lamp is when nobody is talking to it ----
+// These must match host/looks.py DEFAULT_LOOK, or the lamp changes appearance
+// when the host dies (see FIRMWARE-API.md, "Fallback look").
 #define FB_HUE                30.0f
 #define FB_SAT                200.0f
 #define FB_VAL                120.0f
-#define FB_GRAD               6.0f
+#define FB_GRAD               28.0f
 #define FB_WAVE_N             1.0f
-#define FB_WAVE_AMP           5.0f
-#define FB_WAVE_HZ            3.0f
+#define FB_WAVE_AMP           30.0f
+#define FB_WAVE_HZ            8.0f
 #define FB_BREATH_HZ          12.0f
 #define FB_BREATH_AMP         55.0f
 #define FB_OPEN               55.0f
 #define FB_EASE_MS            3000.0f
 #define FB_SLEEP_DIM          0.45f   // how much of val/open the quiet dims
 
-// Servo (eyelid / louver). Off by default: open is rendered by modulation.
-// Flip ENABLE_SERVO to 1 and the same open parameter drives the servo.
-#define ENABLE_SERVO          0
-#define PIN_SERVO             5
-#define LID_SERVO_CLOSED_US   1000
-#define LID_SERVO_OPEN_US     2000
+// ================= blades: three servos =================
+// Three SG90s sit inside the ring, shafts radial (120 deg apart), each turning
+// an opaque blade over a narrow arc. `open` 0..100 is the eyelid again, but now
+// the occlusion is mechanical: the blade arc is deliberately small (200 us is
+// about 18 degrees on an SG90), which is all a blade needs to clear the LEDs.
+//
+// No two horns are mounted the same way, so every servo has its own end points;
+// swap them to invert a blade. Tune at runtime from the serial monitor with
+//   B,<1..3>,<closed_us>,<open_us>     (not persisted; see PROTOCOL.md)
+// or edit the defaults below. 1000..2000 us is the SG90-safe range.
+//
+// Pins: D11, D9, D10. D5 was the first choice but is the SPI SS pin and the
+// header contact on some boards is unreliable; D11 is a plain GPIO (P0.06) and
+// is not used by Wire (D22/D23), SPI (D24-D26), the PDM mic (D34/D35) or the
+// on-board LEDs (D4/D8/D13).
+//
+// STATUS: parked. The servos that arrived are 360 deg continuous-rotation
+// (1500 us = stop, pulse = speed), so they cannot hold a blade at an angle.
+// The code below is complete and tested; fit 180 deg positional servos and
+// build with -DENABLE_SERVO=1 (or flip the default) to use it. While it is 0
+// the lamp keeps the v2.2 brightness eyelid, so `open` and `K` still read as
+// blinks with no hardware attached.
+#ifndef ENABLE_SERVO
+  #define ENABLE_SERVO        0
+#endif
+#define SERVO_COUNT           3
+#define SERVO_DIM_LIGHT       0     // 0: the blades occlude, light stays even
+                                    // 1: also fade brightness as they close
+#define SERVO_DEADBAND_US     2     // ignore sub-2 us changes (no servo jitter)
+#define SERVO_US_MIN          1000
+#define SERVO_US_MAX          2000
 
 #if ENABLE_SERVO
   #include <Servo.h>
-  Servo louverServo;
+  static const uint8_t SERVO_PIN[SERVO_COUNT] = { 11, 9, 10 };  // D11, D9, D10
+#endif
+
+// closed -> open pulse width, per blade. 1500 is the horn centre; 1450 -> 1650
+// is an 18 degree swing, enough to uncover a third of the ring.
+uint16_t servoClosedUs[SERVO_COUNT] = { 1450, 1450, 1450 };
+uint16_t servoOpenUs[SERVO_COUNT]   = { 1650, 1650, 1650 };
+
+#if ENABLE_SERVO
+  Servo    blades[SERVO_COUNT];
+  uint16_t bladeUs[SERVO_COUNT];    // last pulse written, for the deadband
 #endif
 
 Adafruit_NeoPixel pixels(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -110,32 +151,41 @@ bool sensorOk = false;
 const float TWO_PI_F = 6.2831853f;
 
 // ================= look parameters =================
-// Field order is the wire order of the F command.
+// Field order is the wire order of the F command. The last three are the
+// v2.2.2 basis expansion: they are appended, so an old host that sends only
+// the first eleven keeps working and gets the old renderer exactly.
 enum Param : uint8_t {
   P_HUE = 0, P_SAT, P_VAL, P_GRAD,
   P_WAVE_N, P_WAVE_AMP, P_WAVE_HZ,
   P_BREATH_HZ, P_BREATH_AMP, P_OPEN, P_EASE,
+  P_HUE_CYCLES, P_SHAPE, P_SPARKLE,
   P_COUNT
 };
 
 float lookTarget[P_COUNT] = {
   FB_HUE, FB_SAT, FB_VAL, FB_GRAD, FB_WAVE_N, FB_WAVE_AMP, FB_WAVE_HZ,
-  FB_BREATH_HZ, FB_BREATH_AMP, FB_OPEN, FB_EASE_MS
+  FB_BREATH_HZ, FB_BREATH_AMP, FB_OPEN, FB_EASE_MS,
+  0.0f, 0.0f, 0.0f
 };
 float lookCur[P_COUNT] = {
   FB_HUE, FB_SAT, FB_VAL, FB_GRAD, FB_WAVE_N, FB_WAVE_AMP, FB_WAVE_HZ,
-  FB_BREATH_HZ, FB_BREATH_AMP, FB_OPEN, FB_EASE_MS
+  FB_BREATH_HZ, FB_BREATH_AMP, FB_OPEN, FB_EASE_MS,
+  0.0f, 0.0f, 0.0f
 };
 
-// order: hue, sat, val, grad, wave_n, wave_amp, wave_hz, breath_hz, breath_amp, open, ease
-// (only used to clamp what arrives on the wire)
+// order: hue, sat, val, grad, wave_n, wave_amp, wave_hz, breath_hz, breath_amp,
+//        open, ease, hue_cycles, shape, sparkle
+// (only used to clamp what arrives on the wire). wave_hz is signed: negative
+// reverses the travelling wave.
 static const float PARAM_LO[P_COUNT] = {
-  0.0f, 0.0f, 0.0f, -128.0f, 0.0f, 0.0f, 0.0f,
-  0.0f, 0.0f, 0.0f, 0.0f
+  0.0f, 0.0f, 0.0f, -128.0f, 0.0f, 0.0f, -255.0f,
+  0.0f, 0.0f, 0.0f, 0.0f,
+  0.0f, 0.0f, 0.0f
 };
 static const float PARAM_HI[P_COUNT] = {
   255.0f, 255.0f, 255.0f, 127.0f, 16.0f, 100.0f, 255.0f,
-  255.0f, 100.0f, 100.0f, 10000.0f
+  255.0f, 100.0f, 100.0f, 10000.0f,
+  400.0f, 100.0f, 100.0f
 };
 
 // ================= render config =================
@@ -152,6 +202,19 @@ int      level = 0;                  // raw 0..100
 float    shown = 0.0f;               // smoothed level
 int      barLit = 0;
 uint16_t frameNo = 0;
+
+// Sparkle: a per-pixel white glint with a short decay. This is the one place
+// the renderer is allowed to be random, and it is what makes stars, fireflies
+// and embers possible without sending 32 pixels over the wire.
+float    spark[LED_COUNT];
+uint32_t rngState = 0x9E3779B9u;     // xorshift32; deterministic for the tests
+
+float rand01() {
+  rngState ^= rngState << 13;
+  rngState ^= rngState >> 17;
+  rngState ^= rngState << 5;
+  return (float)(rngState & 0xFFFFFFu) / 16777215.0f;
+}
 
 // ================= openness (the old "eyelid") =================
 float lidPos    = FB_OPEN;           // effective 0..100, used for rendering
@@ -236,6 +299,8 @@ void requestTransient(uint8_t mode);
 void startle(uint32_t now);
 void handleLevel(int value, uint32_t now);
 float openGain(float open);
+void updateBlades(float openPct, bool force);
+void reportBlade(uint8_t i);
 float sleepScale(uint32_t now);
 float updateTransient(uint32_t now, float baseOpen);
 float gammaEncode(float x);
@@ -266,6 +331,40 @@ float openGain(float open) {
   return 0.02f + 0.98f * (open / 100.0f);
 }
 
+// Map `open` 0..100 onto each blade's own arc. Called every render frame (50 Hz);
+// the deadband keeps a settled servo from being rewritten for nothing.
+void updateBlades(float openPct, bool force) {
+#if ENABLE_SERVO
+  if (openPct < 0.0f) openPct = 0.0f;
+  if (openPct > 100.0f) openPct = 100.0f;
+  int32_t q = (int32_t)lroundf(openPct * 10.0f);   // 0..1000, 0.1% resolution
+  for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+    int32_t span = (int32_t)servoOpenUs[i] - (int32_t)servoClosedUs[i];
+    int32_t us = (int32_t)servoClosedUs[i] + span * q / 1000;
+    if (us < SERVO_US_MIN) us = SERVO_US_MIN;
+    if (us > SERVO_US_MAX) us = SERVO_US_MAX;
+    int32_t diff = us - (int32_t)bladeUs[i];
+    if (diff < 0) diff = -diff;
+    if (!force && diff < SERVO_DEADBAND_US) continue;
+    blades[i].writeMicroseconds((int)us);
+    bladeUs[i] = (uint16_t)us;
+  }
+#else
+  (void)openPct;
+  (void)force;
+#endif
+}
+
+void reportBlade(uint8_t i) {
+  if (i >= SERVO_COUNT) return;
+  Serial.print("E,BLADE,");
+  Serial.print(i + 1);
+  Serial.print(',');
+  Serial.print(servoClosedUs[i]);
+  Serial.print(',');
+  Serial.println(servoOpenUs[i]);
+}
+
 int presetIndex(const char *name) {
   for (uint8_t i = 0; i < PRESET_COUNT; i++) {
     if (!strcmp(name, PRESET_NAME[i])) return (int)i;
@@ -286,6 +385,9 @@ void applyPreset(uint8_t idx, float hue, float bright, float lid, float easeMs) 
   lookTarget[P_BREATH_AMP] = p.breathAmp;
   lookTarget[P_OPEN]       = lid;
   lookTarget[P_EASE]       = easeMs;
+  lookTarget[P_HUE_CYCLES] = 0.0f;
+  lookTarget[P_SHAPE]      = 0.0f;
+  lookTarget[P_SPARKLE]    = 0.0f;
 }
 
 void installFallback() {
@@ -300,6 +402,9 @@ void installFallback() {
   lookTarget[P_BREATH_AMP] = FB_BREATH_AMP;
   lookTarget[P_OPEN]       = FB_OPEN;
   lookTarget[P_EASE]       = FB_EASE_MS;
+  lookTarget[P_HUE_CYCLES] = 0.0f;
+  lookTarget[P_SHAPE]      = 0.0f;
+  lookTarget[P_SPARKLE]    = 0.0f;
 }
 
 // The lamp dims itself when nothing has happened for a while. In v2.1 this was
@@ -382,20 +487,42 @@ void renderFrame(uint32_t now, float sleep) {
   float env = 1.0f - amp * (0.5f - 0.5f * cosf(breathPhase));
   int   distIdx = (int)((now / FRAME_MS) & 3);
 
+  // v2.2.2 basis: full hue rotations around the ring, a pulse-shaped wave
+  // (sine at shape 0, a narrow comet at 100), and per-pixel white glints.
+  float cycles = lookCur[P_HUE_CYCLES] / 100.0f;      // 0..4 turns
+  float waveAmp = lookCur[P_WAVE_AMP] / 100.0f;
+
+  // shape narrows the wave into a pulse. The family is smooth in `shape` and
+  // reduces exactly to a sine at 0: win = ((1+s)/2)^(1+7*shape), shaped = 2win-1.
+  // At shape 100 the ring sits dark (1 - amp) with one narrow bright comet.
+  float shapeK = lookCur[P_SHAPE] / 100.0f;
+  float shapeExp = 1.0f + 7.0f * shapeK;
+
   for (uint16_t i = 0; i < LED_COUNT; i++) {
     float x = (float)i / (float)(LED_COUNT - 1);
-    float h = lookCur[P_HUE] + lookCur[P_GRAD] * (x - 0.5f) * 2.0f;
-    float w = 1.0f + (lookCur[P_WAVE_AMP] / 100.0f) *
-                     sinf(TWO_PI_F * lookCur[P_WAVE_N] * x - wavePhase);
+    float h = lookCur[P_HUE] + lookCur[P_GRAD] * (x - 0.5f) * 2.0f
+              + cycles * 256.0f * x;
+
+    float s = sinf(TWO_PI_F * lookCur[P_WAVE_N] * x - wavePhase);
+    float shaped = s;
+    if (shapeK > 0.001f) {
+      shaped = 2.0f * powf(0.5f + 0.5f * s, shapeExp) - 1.0f;
+    }
+    float w = 1.0f + waveAmp * shaped;
 
     float v = (lookCur[P_VAL] / 255.0f) * env * w * sleep;
     v *= gOpenGain * gMusicGain;
     v += flash * 0.9f;
     v += beatPulse * 0.18f * (0.25f + 0.75f * gOpenGain) * (couplingBeat / 100.0f);
+
+    // A spark is a white point: add brightness and pull the saturation down.
+    // It rides through the eyelid, so a closed lamp does not twinkle.
+    float sp = spark[i];
+    v += sp * 0.9f * gOpenGain;
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
 
-    float sat = lookCur[P_SAT] * (1.0f - 0.8f * flash);
+    float sat = lookCur[P_SAT] * (1.0f - 0.8f * flash) * (1.0f - 0.85f * sp);
     if (sat < 0.0f) sat = 0.0f;
     if (sat > 255.0f) sat = 255.0f;
     int hh = ((int)lroundf(h) % 256 + 256) % 256;
@@ -525,6 +652,29 @@ void handleLine(char *line, uint32_t now) {
     if (parseArg(strtok(NULL, ","), &cap, 0.0f, 255.0f)) gCap = (uint8_t)cap;
     if (parseArg(strtok(NULL, ","), &gamma, 0.0f, 2.0f)) gGamma = (uint8_t)gamma;
     if (parseArg(strtok(NULL, ","), &dither, 0.0f, 1.0f)) gDither = dither > 0.5f;
+    return;
+  }
+
+  // ---------------- blade calibration (v2.2.1) ----------------
+  // B with no arguments reports all three end points; with arguments it sets one
+  // and moves that blade immediately. Not persisted, like G.
+  if (!strcmp(cmd, "B")) {
+    char *arg = strtok(NULL, ",");
+    if (arg == NULL) {
+      for (uint8_t i = 0; i < SERVO_COUNT; i++) reportBlade(i);
+      return;
+    }
+    float idx, closed, open;
+    if (!parseArg(arg, &idx, 1.0f, (float)SERVO_COUNT)) return;
+    if (!parseArg(strtok(NULL, ","), &closed,
+                  (float)SERVO_US_MIN, (float)SERVO_US_MAX)) return;
+    if (!parseArg(strtok(NULL, ","), &open,
+                  (float)SERVO_US_MIN, (float)SERVO_US_MAX)) return;
+    uint8_t i = (uint8_t)lroundf(idx) - 1;
+    servoClosedUs[i] = (uint16_t)lroundf(closed);
+    servoOpenUs[i]   = (uint16_t)lroundf(open);
+    updateBlades(lidPos, true);
+    reportBlade(i);
     return;
   }
 
@@ -720,13 +870,29 @@ void update(float dt, uint32_t now) {
   // ---- phases ----
   breathPhase += TWO_PI_F * (lookCur[P_BREATH_HZ] / 100.0f) * dt;
   if (breathPhase > TWO_PI_F) breathPhase -= TWO_PI_F;
+  // wave_hz is signed: negative travels the other way round the ring.
   wavePhase += TWO_PI_F * (lookCur[P_WAVE_HZ] / 100.0f) * dt;
   if (wavePhase > TWO_PI_F) wavePhase -= TWO_PI_F;
+  else if (wavePhase < 0.0f) wavePhase += TWO_PI_F;
 
   shown += ((float)level - shown) * SMOOTH;
 
   flash *= expf(-dt / FLASH_TAU_S);
   if (flash < 0.01f) flash = 0.0f;
+
+  // ---- sparkle: decay, then ignite a few pixels -------------------------
+  float sparkDecay = expf(-dt / 0.12f);
+  for (uint8_t i = 0; i < LED_COUNT; i++) {
+    spark[i] *= sparkDecay;
+    if (spark[i] < 0.01f) spark[i] = 0.0f;
+  }
+  float density = lookCur[P_SPARKLE] / 100.0f;
+  if (density > 0.001f) {
+    float p = density * 3.0f * dt;          // per pixel per frame, 0..0.06
+    for (uint8_t i = 0; i < LED_COUNT; i++) {
+      if (rand01() < p) spark[i] = 0.55f + 0.45f * rand01();
+    }
+  }
 
   if (musicLevel == 0 || (uint32_t)(now - lastMusicAt) > 1500) {
     gMusicGain = 1.0f;
@@ -744,13 +910,14 @@ void update(float dt, uint32_t now) {
   // ---- openness ----
   float sleep = sleepScale(now);
   lidPos = updateTransient(now, constrain(lookCur[P_OPEN] * sleep, 0.0f, 100.0f));
+#if ENABLE_SERVO && !SERVO_DIM_LIGHT
+  // The blades already occlude; dimming as well would double the effect and
+  // leave the paper glowing unevenly around them.
+  gOpenGain = 1.0f;
+#else
   gOpenGain = openGain(lidPos);
-
-#if ENABLE_SERVO
-  int us = (int)(LID_SERVO_CLOSED_US +
-                 (LID_SERVO_OPEN_US - LID_SERVO_CLOSED_US) * (lidPos / 100.0f));
-  louverServo.writeMicroseconds(us);
 #endif
+  updateBlades(lidPos, false);
 
   renderFrame(now, sleep);
   pixels.show();
@@ -762,6 +929,26 @@ void update(float dt, uint32_t now) {
 
 void setup() {
   Serial.begin(115200);
+
+#if ENABLE_SERVO
+  // Claim the servos *before* the first pixels.show(): the NeoPixel driver picks
+  // the first PWM peripheral that is idle and disconnected, so taking PWM0 for
+  // the blades here keeps the two off each other's module for good.
+  for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+    bladeUs[i] = 0;
+    int idx = blades[i].attach(SERVO_PIN[i], SERVO_US_MIN, SERVO_US_MAX);
+    if (idx == INVALID_SERVO) {
+      Serial.print("E,SERVO_FAIL,");
+      Serial.println(i + 1);
+    } else {
+      Serial.print("E,SERVO_OK,");
+      Serial.print(i + 1);
+      Serial.print(',');
+      Serial.println(SERVO_PIN[i]);
+    }
+  }
+  updateBlades(FB_OPEN, true);   // start where the fallback look would be
+#endif
 
   pixels.begin();
   pixels.setBrightness(255);      // the cap lives in software now (G command)
@@ -777,13 +964,6 @@ void setup() {
     sendEvent("SENSOR_FAIL", "apds9960");
   }
 
-#if ENABLE_SERVO
-  louverServo.attach(PIN_SERVO, LID_SERVO_CLOSED_US, LID_SERVO_OPEN_US);
-  louverServo.writeMicroseconds(
-      (int)(LID_SERVO_CLOSED_US +
-            (LID_SERVO_OPEN_US - LID_SERVO_CLOSED_US) * (FB_OPEN / 100.0f)));
-#endif
-
   // keep the warm-orange boot colour, hold it 400 ms, then start the render loop
   pixels.fill(pixels.Color(255, 70, 10));
   pixels.show();
@@ -797,7 +977,11 @@ void setup() {
   lastActivityAt = now;
   lastStartleAt = now - 5000UL;
   lidPos = FB_OPEN;
+#if ENABLE_SERVO && !SERVO_DIM_LIGHT
+  gOpenGain = 1.0f;
+#else
   gOpenGain = openGain(lidPos);
+#endif
   installFallback();
 
   sendEvent("BOOT", FW_VERSION);

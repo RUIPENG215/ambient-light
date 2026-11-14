@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ambient Lamp</title>
+<style>
+  :root {
+    --bg: #15120e; --panel: #1d1813; --panel-2: #2a231b; --line: #3a3025;
+    --text: #f2e8d8; --dim: #a99a86; --accent: #ffb45e; --bad: #e0776a; --ok: #8fce9b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    color: var(--text); font-size: 14px; -webkit-user-select: none; user-select: none;
+  }
+  body.browser { background: radial-gradient(80% 70% at 50% 0%, #2b2116 0%, var(--bg) 60%); }
+
+  /* ---------- the pet: a ring in the corner ---------- */
+  #pet { position: fixed; right: 8px; bottom: 8px; width: 132px; height: 132px; cursor: pointer; }
+  #ring { width: 132px; height: 132px; display: block; }
+  #grip {
+    position: fixed; right: 58px; bottom: 58px; width: 32px; height: 32px; border-radius: 50%;
+    cursor: grab; opacity: 0; transition: opacity .2s;
+    background: radial-gradient(circle, rgba(255,255,255,.22), rgba(255,255,255,0) 70%);
+  }
+  #pet:hover ~ #grip, #grip:hover { opacity: 1; }
+  #bubble {
+    position: fixed; right: 20px; bottom: 148px; max-width: 250px;
+    background: rgba(32,26,20,.94); border: 1px solid var(--line); border-radius: 14px 14px 4px 14px;
+    padding: 9px 13px; line-height: 1.5; font-size: 13.5px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.45);
+    opacity: 0; transform: translateY(6px); transition: opacity .25s, transform .25s; pointer-events: none;
+  }
+  #bubble.show { opacity: 1; transform: none; }
+  #bubble.reminder { border-color: var(--accent); }
+
+  /* ---------- the panel ---------- */
+  #panel {
+    position: fixed; inset: 0; display: none; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+  }
+  body.open #panel { display: flex; }
+  body.open #pet { position: absolute; left: 10px; top: 6px; right: auto; bottom: auto; width: 76px; height: 76px; z-index: 3; }
+  body.open #ring { width: 76px; height: 76px; }
+  body.open #bubble, body.open #grip { display: none; }
+  body.browser #panel { inset: 24px auto 24px 50%; width: 400px; transform: translateX(-50%); }
+  body.browser #pet { left: calc(50% - 190px); top: 30px; }
+
+  header { height: 88px; padding: 16px 14px 0 98px; flex: none; position: relative; }
+  header .name { font-size: 17px; font-weight: 650; letter-spacing: .01em; }
+  header .state { color: var(--dim); font-size: 12px; margin-top: 3px; }
+  header .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--bad); }
+  header .dot.on { background: var(--ok); box-shadow: 0 0 8px rgba(143,206,155,.6); }
+  header .tools { position: absolute; right: 10px; top: 10px; display: flex; gap: 4px; }
+  header .tools button { width: 26px; height: 26px; padding: 0; border-radius: 8px; font-size: 14px; line-height: 1; }
+  .drag { position: absolute; left: 96px; right: 80px; top: 0; height: 60px; cursor: grab; }
+
+  nav { display: flex; gap: 4px; padding: 0 12px; border-bottom: 1px solid var(--line); flex: none; }
+  nav button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; color: var(--dim); padding: 8px 10px; }
+  nav button.on { color: var(--text); border-bottom-color: var(--accent); }
+
+  section { flex: 1 1 0; min-height: 0; display: none; flex-direction: column; }
+  section.on { display: flex; }
+
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    padding: 7px 10px; font: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
+
+  /* chat */
+  #log { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 14px 14px 6px; display: flex; flex-direction: column; gap: 9px;
+         -webkit-user-select: text; user-select: text; }
+  .msg { max-width: 84%; padding: 8px 12px; border-radius: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #24170a; border-bottom-right-radius: 4px; }
+  .msg.lamp { align-self: flex-start; background: #35291d; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.sys { align-self: center; color: var(--dim); font-size: 12px; }
+  .composer { display: flex; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); flex: none; }
+  textarea, input[type=text], input[type=password] {
+    flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    padding: 9px 11px; font: inherit; outline: none; -webkit-user-select: text; user-select: text;
+  }
+  textarea { resize: none; height: 40px; }
+  textarea:focus, input:focus { border-color: var(--accent); }
+  #send { background: var(--accent); color: #24170a; border: 0; font-weight: 650; padding: 0 16px; }
+  #send:disabled { opacity: .5; }
+
+  /* colour */
+  .scroll { overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 13px; }
+  .row label { display: flex; justify-content: space-between; color: var(--dim); font-size: 12px; margin-bottom: 5px; }
+  .row label b { color: var(--text); font-weight: 550; font-variant-numeric: tabular-nums; }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 14px; border-radius: 7px; background: var(--panel-2); outline: none; margin: 0; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid #24170a; cursor: pointer; }
+  #hue, #hue2 { background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; cursor: pointer; }
+  .chip i { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  .chip span.x { color: var(--dim); padding: 0 4px; }
+  .chip span.x:hover { color: var(--bad); }
+  .saver { display: flex; gap: 8px; }
+  h4 { margin: 4px 0 0; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .note { color: var(--dim); font-size: 12px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <header>
+    <div class="drag pywebview-drag-region"></div>
+    <div class="name">Ambient Lamp</div>
+    <div class="state"><span id="dot" class="dot"></span><span id="state">connecting…</span></div>
+    <div class="tools">
+      <button id="min" title="back to the corner">–</button>
+      <button id="quit" title="quit">×</button>
+    </div>
+  </header>
+  <nav>
+    <button data-tab="chat" class="on">Talk</button>
+    <button data-tab="colour">Colour</button>
+    <button data-tab="play">Play</button>
+    <button data-tab="setup">Setup</button>
+  </nav>
+
+  <section id="tab-chat" class="on">
+    <div id="log"></div>
+    <div class="composer">
+      <textarea id="input" placeholder="say something to it…"></textarea>
+      <button id="send">send</button>
+    </div>
+  </section>
+
+  <section id="tab-colour">
+    <div class="scroll">
+      <div class="row"><label>Colour <b id="v-hue"></b></label><input type="range" id="hue" min="0" max="255"></div>
+      <div class="row"><label>Second colour <b id="v-hue2"></b></label><input type="range" id="hue2" min="0" max="255"></div>
+      <div class="row"><label>Rainbow <b id="v-hue_cycles"></b></label><input type="range" id="hue_cycles" min="0" max="200"></div>
+      <div class="row"><label>Richness <b id="v-sat"></b></label><input type="range" id="sat" min="0" max="255"></div>
+      <div class="row"><label>Brightness <b id="v-val"></b></label><input type="range" id="val" min="10" max="255"></div>
+      <div class="row"><label>Flow <b id="v-wave_hz"></b></label><input type="range" id="wave_hz" min="-60" max="60"></div>
+      <div class="row"><label>Flow depth <b id="v-wave_amp"></b></label><input type="range" id="wave_amp" min="0" max="100"></div>
+      <div class="row"><label>Stars <b id="v-sparkle"></b></label><input type="range" id="sparkle" min="0" max="60"></div>
+      <h4>Keep this look</h4>
+      <div class="saver"><input type="text" id="lookname" placeholder="give it a name" maxlength="40"><button id="save">save</button></div>
+      <div class="chips" id="looks"></div>
+      <div class="note">A look you mix here stays for 20 minutes of quiet. The lamp knows the names: ask it for one in Talk.</div>
+      <button id="rest">back to resting amber</button>
+    </div>
+  </section>
+
+  <section id="tab-play">
+    <div class="scroll">
+      <h4>Body language</h4>
+      <div class="grid" id="gestures"></div>
+      <h4>Performances</h4>
+      <div class="grid" id="effects"></div>
+      <button id="stopfx">stop the performance</button>
+      <div class="note">These are the same movements the lamp chooses by itself when it talks to you.</div>
+    </div>
+  </section>
+
+  <section id="tab-setup">
+    <div class="scroll">
+      <h4>Mind</h4>
+      <div class="note" id="keystate">checking…</div>
+      <div class="saver"><input type="password" id="key" placeholder="DeepSeek API key (sk-…)"><button id="savekey">use</button></div>
+      <h4>Senses</h4>
+      <div class="note" id="senses">—</div>
+      <div class="note">Music is heard through BlackHole (a Multi-Output Device). Presence is the Mac's keyboard and trackpad. Sound is the Mac's microphone.</div>
+    </div>
+  </section>
+</div>
+
+<div id="bubble"></div>
+<div id="pet" title="click to open"><canvas id="ring" width="264" height="264"></canvas></div>
+<div id="grip" class="pywebview-drag-region" title="drag"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const hasShell = () => !!(window.pywebview && window.pywebview.api);
+let open = false;
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  };
+  const response = await fetch(path, opts);
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  return response.json();
+}
+
+/* ------------------------------------------------------------ the ring
+   The same maths the firmware runs, so the face on the screen and the paper
+   lamp are one body. The host sends the frame it puts on the wire. */
+const N = 32, TAU = Math.PI * 2;
+const F = ["hue","sat","val","grad","wave_n","wave_amp","wave_hz","breath_hz","breath_amp","open","ease","hue_cycles","shape","sparkle"];
+const REST = [30,200,120,28,1,30,8,12,10,55,3000,0,0,0];
+let target = REST.slice(), cur = REST.slice();
+let breath = 0, wave = 0, online = false, lastFrame = performance.now();
+const spark = new Float32Array(N);
+const canvas = $("ring"), ctx = canvas.getContext("2d");
+
+function parseLine(line) {
+  if (!line || line[0] !== "F") return null;
+  const p = line.split(",").slice(1).map(Number);
+  if (p.length < 11 || p.some(Number.isNaN)) return null;
+  while (p.length < 14) p.push(0);
+  return p;
+}
+
+function hsv(h, s, v) {
+  h = ((h % 256) + 256) % 256 / 256 * 6; s /= 255;
+  const i = Math.floor(h), f = h - i, p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+  const [r, g, b] = [[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i % 6];
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+function draw(now) {
+  const dt = Math.min(0.1, (now - lastFrame) / 1000); lastFrame = now;
+  const a = 1 - Math.exp(-dt / 0.07);
+  for (let i = 0; i < 14; i++) {
+    if (i === 0) { const d = ((target[0] - cur[0] + 128) % 256 + 256) % 256 - 128; cur[0] += d * a; }
+    else cur[i] += (target[i] - cur[i]) * a;
+  }
+  breath = (breath + TAU * cur[7] / 100 * dt) % TAU;
+  wave = (wave + TAU * cur[6] / 100 * dt) % TAU;
+  const decay = Math.exp(-dt / 0.12), density = cur[13] / 100;
+  for (let i = 0; i < N; i++) {
+    spark[i] *= decay;
+    if (density > 0.001 && Math.random() < density * 3 * dt) spark[i] = 0.55 + 0.45 * Math.random();
+  }
+  const W = canvas.width, c = W / 2, R = W * 0.33, blob = W * 0.15;
+  ctx.clearRect(0, 0, W, W);
+  ctx.globalCompositeOperation = "source-over";
+  ctx.beginPath(); ctx.arc(c, c, R, 0, TAU);
+  ctx.lineWidth = W * 0.085; ctx.strokeStyle = online ? "rgba(40,32,24,.55)" : "rgba(60,60,60,.5)"; ctx.stroke();
+  ctx.globalCompositeOperation = "lighter";
+  const env = 1 - (cur[8] / 100) * (0.5 - 0.5 * Math.cos(breath));
+  const gain = 0.02 + 0.98 * Math.max(0, Math.min(100, cur[9])) / 100;
+  const amp = cur[5] / 100, shapeK = cur[12] / 100, cycles = cur[11] / 100;
+  for (let i = 0; i < N; i++) {
+    const x = i / (N - 1);
+    const h = cur[0] + cur[3] * (x - 0.5) * 2 + cycles * 256 * x;
+    let s = Math.sin(TAU * cur[4] * x - wave);
+    if (shapeK > 0.001) s = 2 * Math.pow(0.5 + 0.5 * s, 1 + 7 * shapeK) - 1;
+    let v = (cur[2] / 255) * env * (1 + amp * s) * gain + spark[i] * 0.9 * gain;
+    v = online ? Math.max(0, Math.min(1, v)) : 0.05;
+    const [r, g, b] = hsv(h, cur[1] * (1 - 0.85 * spark[i]), 1);
+    const ang = -Math.PI / 2 + TAU * i / N, px = c + R * Math.cos(ang), py = c + R * Math.sin(ang);
+    const lum = Math.pow(v, 0.55);                 // the eye is not linear
+    const grad = ctx.createRadialGradient(px, py, 0, px, py, blob);
+    grad.addColorStop(0, `rgba(${r},${g},${b},${0.95 * lum})`);
+    grad.addColorStop(0.45, `rgba(${r},${g},${b},${0.35 * lum})`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.fillStyle = grad; ctx.fillRect(px - blob, py - blob, blob * 2, blob * 2);
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+/* ------------------------------------------------------------ feed */
+let since = -1, bubbleTimer = 0, misses = 0;
+function bubble(text, kind) {
+  const el = $("bubble");
+  el.textContent = text; el.className = "show" + (kind === "reminder" ? " reminder" : "");
+  clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(() => { el.className = ""; }, Math.min(14000, 4500 + text.length * 120));
+}
+async function feed() {
+  try {
+    const d = await api("/api/feed?since=" + Math.max(0, since));
+    misses = 0;
+    const was = online; online = !!d.ok;
+    const f = parseLine(d.line); if (f) target = f;
+    if (since < 0) since = d.last_id || 0;         // do not replay old lines on start
+    for (const u of d.utterances || []) {
+      since = Math.max(since, u.id);
+      if (!open) bubble(u.text, u.kind);
+      if (u.kind !== "reply") add("lamp", u.text);
+    }
+    if (online !== was || open) headline(d);
+  } catch (err) {
+    if (++misses > 4) { online = false; headline(null); }
+  }
+  setTimeout(feed, online ? 80 : 1000);
+}
+function headline(d) {
+  $("dot").className = "dot" + (online ? " on" : "");
+  if (!d || !online) { $("state").textContent = "the lamp is not running"; return; }
+  const bits = [];
+  bits.push(d.link ? "lamp connected" : "no lamp on USB");
+  if (d.music) bits.push("dancing"); else if (d.away) bits.push("you are away");
+  if (d.gesture) bits.push(d.gesture.name);
+  else if (d.effect) bits.push(d.effect.name);
+  if (!d.agent) bits.push("no mind (reflex only)");
+  $("state").textContent = bits.join(" · ");
+}
+
+/* ------------------------------------------------------------ chat */
+const log = $("log"), input = $("input");
+function add(role, text) {
+  const el = document.createElement("div");
+  el.className = "msg " + role; el.textContent = text;
+  log.appendChild(el); log.scrollTop = log.scrollHeight;
+  return el;
+}
+async function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = ""; add("user", text);
+  $("send").disabled = true;
+  const wait = add("sys", "…");
+  try {
+    const d = await api("/api/chat", { message: text });
+    wait.remove(); add("lamp", d.reply || "…");
+  } catch (err) {
+    wait.remove(); add("sys", "it did not answer");
+  } finally {
+    $("send").disabled = false; input.focus();
+  }
+}
+$("send").addEventListener("click", send);
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+
+/* ------------------------------------------------------------ colour */
+const SLIDERS = ["hue","sat","val","wave_hz","wave_amp","sparkle","hue_cycles"];
+let pushTimer = 0, touching = false;
+function label(id) {
+  const v = Number($(id).value);
+  const names = [[0,"red"],[18,"orange"],[30,"amber"],[42,"yellow"],[85,"green"],[128,"cyan"],[150,"teal"],[170,"blue"],[200,"violet"],[225,"magenta"],[240,"pink"],[256,"red"]];
+  if (id === "hue" || id === "hue2") {
+    let best = names[0]; for (const n of names) if (Math.abs(n[0] - v) < Math.abs(best[0] - v)) best = n;
+    return best[1];
+  }
+  if (id === "wave_hz") return v === 0 ? "still" : (Math.abs(v) < 15 ? "slow" : Math.abs(v) < 35 ? "lively" : "fast") + (v < 0 ? " ←" : " →");
+  if (id === "hue_cycles") return v < 5 ? "off" : (v / 100).toFixed(1) + "×";
+  return String(v);
+}
+function labels() { for (const id of [...SLIDERS, "hue2"]) $("v-" + id).textContent = label(id); }
+function mix() {
+  // two colours -> a centre hue and a spread across the ring (the short way round)
+  const h1 = Number($("hue").value), h2 = Number($("hue2").value);
+  const d = ((h2 - h1 + 128) % 256 + 256) % 256 - 128;
+  const look = { hue: Math.round(((h1 + d / 2) % 256 + 256) % 256), grad: Math.round(d / 2), ease: 250, hold: 1200, reason: "panel" };
+  for (const id of SLIDERS) if (id !== "hue") look[id] = Number($(id).value);
+  if (look.wave_amp > 0 && Number($("wave_hz").value) !== 0) look.wave_n = 1;
+  return look;
+}
+function pushLight() {
+  labels();
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => { api("/api/light", mix()).catch(() => {}); }, 60);
+}
+for (const id of [...SLIDERS, "hue2"]) {
+  $(id).addEventListener("input", pushLight);
+  $(id).addEventListener("pointerdown", () => { touching = true; });
+  $(id).addEventListener("pointerup", () => { touching = false; });
+}
+function setSliders(light) {
+  if (!light || touching) return;
+  const hue = light.hue ?? 30, grad = light.grad ?? 0;
+  $("hue").value = ((hue - grad) % 256 + 256) % 256;
+  $("hue2").value = ((hue + grad) % 256 + 256) % 256;
+  for (const id of SLIDERS) if (id !== "hue" && light[id] !== undefined) $(id).value = light[id];
+  labels();
+}
+$("rest").addEventListener("click", async () => {
+  await api("/api/light", { hue: 30, sat: 200, val: 120, grad: 28, wave_n: 1, wave_amp: 30, wave_hz: 8,
+    breath_hz: 12, breath_amp: 55, open: 55, ease: 1500, hue_cycles: 0, shape: 0, sparkle: 0, reason: "panel: rest" }).catch(() => {});
+  status();
+});
+
+async function looks() {
+  let d; try { d = await api("/api/looks"); } catch (err) { return; }
+  const box = $("looks"); box.textContent = "";
+  for (const [name, f] of Object.entries(d.looks || {})) {
+    const chip = document.createElement("span"); chip.className = "chip";
+    const sw = document.createElement("i"); const [r, g, b] = hsv(f.hue ?? 30, f.sat ?? 200, 1);
+    sw.style.background = `rgb(${r},${g},${b})`;
+    const label = document.createElement("span"); label.textContent = name;
+    const x = document.createElement("span"); x.className = "x"; x.textContent = "×";
+    chip.append(sw, label, x);
+    chip.addEventListener("click", async (e) => {
+      if (e.target === x) await api("/api/looks/forget", { name }).catch(() => {});
+      else await api("/api/looks/recall", { name }).catch(() => {});
+      looks(); status();
+    });
+    box.appendChild(chip);
+  }
+}
+$("save").addEventListener("click", async () => {
+  const name = $("lookname").value.trim(); if (!name) { $("lookname").focus(); return; }
+  await api("/api/looks/save", { name }).catch(() => {});
+  $("lookname").value = ""; looks();
+});
+
+/* ------------------------------------------------------------ play */
+const GESTURES = ["nod","shake","happy","shy","sulk","surprise","wave","think"];
+const EFFECTS = ["candle","heartbeat","ocean","aurora"];
+for (const g of GESTURES) {
+  const b = document.createElement("button"); b.textContent = g;
+  b.addEventListener("click", () => api("/api/gesture", { name: g, seconds: g === "think" ? 3 : undefined }).catch(() => {}));
+  $("gestures").appendChild(b);
+}
+for (const e of EFFECTS) {
+  const b = document.createElement("button"); b.textContent = e;
+  b.addEventListener("click", () => api("/api/effect", { name: e }).catch(() => {}));
+  $("effects").appendChild(b);
+}
+$("stopfx").addEventListener("click", () => api("/api/effect", { stop: true }).catch(() => {}));
+
+/* ------------------------------------------------------------ setup + status */
+async function status() {
+  let d; try { d = await api("/api/status"); } catch (err) { return; }
+  if (!d.online) return;
+  setSliders((d.lamp || {}).light);
+  const s = d.senses || {}, m = d.mac || {};
+  $("senses").textContent = `sound ${s.level ?? 0} · music ${s.music ?? 0} · idle ${s.idle_s ?? 0}s` +
+    (m.playing ? ` · playing ${m.title || ""}` : "");
+}
+async function config() {
+  try {
+    const d = await api("/api/config");
+    $("keystate").textContent = d.agent ? `Thinking with ${d.model}.` :
+      (d.has_key ? "A key is saved, but the mind is not running — check the log." : "No key yet: the lamp only has reflexes.");
+  } catch (err) { $("keystate").textContent = "the lamp is not running"; }
+}
+$("savekey").addEventListener("click", async () => {
+  const key = $("key").value.trim(); if (!key) return;
+  $("keystate").textContent = "trying the key…";
+  try { const d = await api("/api/config", { key }); $("key").value = "";
+        $("keystate").textContent = d.ok ? `Thinking with ${d.agent}.` : ("That did not work: " + (d.error || "")); }
+  catch (err) { $("keystate").textContent = "could not reach the lamp"; }
+});
+
+/* ------------------------------------------------------------ shell */
+document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll("section").forEach((s) => s.classList.toggle("on", s.id === "tab-" + b.dataset.tab));
+  if (b.dataset.tab === "colour") { status(); looks(); }
+  if (b.dataset.tab === "setup") { status(); config(); }
+  if (b.dataset.tab === "chat") input.focus();
+}));
+async function setOpen(next) {
+  open = next;
+  if (hasShell()) { try { await window.pywebview.api.mode(open ? "panel" : "pet"); } catch (err) {} }
+  document.body.classList.toggle("open", open);
+  if (open) { status(); looks(); config(); input.focus(); }
+}
+$("pet").addEventListener("click", () => { if (hasShell()) setOpen(!open); });
+$("min").addEventListener("click", () => setOpen(false));
+$("quit").addEventListener("click", () => { if (hasShell()) window.pywebview.api.quit(); else setOpen(false); });
+
+async function history() {
+  try { const d = await api("/api/history");
+        for (const m of (d.messages || []).slice(-20)) add(m.role === "user" ? "user" : "lamp", m.text || m.content || ""); }
+  catch (err) {}
+}
+function boot() {
+  if (!hasShell()) { document.body.classList.add("browser", "open"); open = true; $("quit").style.display = "none"; $("min").style.display = "none"; status(); looks(); config(); }
+  history(); feed(); setInterval(() => { if (open) status(); }, 3000);
+}
+let booted = false;
+function once() { if (!booted) { booted = true; boot(); } }
+window.addEventListener("pywebviewready", once);
+window.addEventListener("load", () => setTimeout(once, 400));   // a plain browser never fires pywebviewready
+</script>
+</body>
+</html>

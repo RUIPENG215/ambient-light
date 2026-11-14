@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -25,7 +26,8 @@ class TestAudio(unittest.TestCase):
         settle(loud, Senses(level=90))
         q, _ = quiet.frame(BASE, Senses(level=5), DT, 3.0)
         l, _ = loud.frame(BASE, Senses(level=90), DT, 3.0)
-        self.assertGreater(l.breath_amp, q.breath_amp)
+        self.assertGreaterEqual(l.breath_amp, q.breath_amp)
+        self.assertGreater(l.wave_amp, q.wave_amp + 10)
         self.assertGreater(l.val, q.val)
 
     def test_breath_stays_inside_the_wire_range(self):
@@ -59,19 +61,84 @@ class TestMusic(unittest.TestCase):
         settle(playing, Senses(level=0, music=80))
         q, _ = quiet.frame(BASE, Senses(level=0, music=0), DT, 3.0)
         p, _ = playing.frame(BASE, Senses(level=0, music=80), DT, 3.0)
-        self.assertGreater(p.breath_amp, q.breath_amp + 10)
-        self.assertGreater(p.val, q.val + 10)
+        self.assertGreater(p.hue_cycles, 80, "music opens the ring into a rainbow")
+        self.assertLess(abs(p.grad), 3, "and the seamed gradient folds away")
+        self.assertEqual(q.hue_cycles, 0)
+        kick, _ = playing.frame(BASE, Senses(level=0, music=80, bass=100), DT, 3.04)
+        self.assertGreater(kick.val, q.val + 40)
+
+    def test_music_makes_the_whole_ring_dance_not_spin(self):
+        r = Reflex()
+        settle(r, Senses(music=90, level=40))
+        gap, _ = r.frame(BASE, Senses(music=90, level=40, bass=0), DT, 3.0)
+        hit, _ = r.frame(BASE, Senses(music=90, level=40, bass=100), DT, 3.04)
+        self.assertLess(gap.val, BASE.val * 0.6, "dim between kicks")
+        self.assertGreater(hit.val, gap.val + 120, "thrown up by the kick")
+        self.assertLess(abs(hit.wave_hz), abs(BASE.wave_hz) * 1.2, "the flow does not speed up")
+        self.assertLess(hit.wave_amp, BASE.wave_amp * 0.4, "and mostly stops")
+        self.assertLessEqual(hit.ease, 40.0)
+
+    def test_a_strong_kick_turns_the_colours_one_notch(self):
+        r = Reflex()
+        settle(r, Senses(music=70))
+        before, _ = r.frame(BASE, Senses(music=70), DT, 3.0)
+        r.frame(BASE, Senses(music=70, bass=100), DT, 3.04)
+        r.frame(BASE, Senses(music=70, bass=90), DT, 3.08)
+        after = before
+        for i in range(3, 14):
+            after, _ = r.frame(BASE, Senses(music=70), DT, 3.0 + i * DT)
+        turned = (after.hue - before.hue) % 256
+        self.assertAlmostEqual(turned, 20.0, delta=3.0, msg="one notch per kick, not per frame")
+
+    def test_no_sparks_while_music_plays(self):
+        """The microphone hears the speakers; that must not read as a voice."""
+        r = Reflex()
+        settle(r, Senses(music=70, level=80), frames=250)   # the rainbow is fully in
+        look, _ = r.frame(BASE, Senses(music=70, level=80, treble=100), DT, 10.0)
+        self.assertLess(look.sparkle, 1.0)
+        room = Reflex()
+        settle(room, Senses(music=0, level=80))
+        talk, _ = room.frame(BASE, Senses(music=0, level=80), DT, 3.0)
+        self.assertGreater(talk.sparkle, 30, "a voice still makes sparks")
+
+    def test_only_the_hardest_kicks_go_white(self):
+        r = Reflex()
+        settle(r, Senses(music=90), frames=250)
+        medium, _ = r.frame(BASE, Senses(music=90, bass=65), DT, 10.0)
+        hard, _ = r.frame(BASE, Senses(music=90, bass=100), DT, 10.04)
+        self.assertAlmostEqual(medium.sat, BASE.sat, delta=1.0, msg="a normal kick keeps its colour")
+        self.assertLess(hard.sat, BASE.sat * 0.2, "the hardest one is white")
+        quiet = Reflex()
+        settle(quiet, Senses())
+        look, _ = quiet.frame(BASE, Senses(bass=100), DT, 3.0)
+        self.assertAlmostEqual(look.sat, BASE.sat, delta=1.0, msg="never without music")
+
+    def test_the_eye_opens_with_the_kick(self):
+        r = Reflex()
+        settle(r, Senses(music=90))
+        gap, _ = r.frame(BASE, Senses(music=90, bass=0), DT, 3.0)
+        hit, _ = r.frame(BASE, Senses(music=90, bass=100), DT, 3.04)
+        self.assertLess(gap.val, BASE.val * 0.25)
+        self.assertGreater(hit.val, 200)
+        self.assertGreater(hit.open, 95)
 
     def test_room_and_music_are_not_counted_twice(self):
         both = Reflex()
         settle(both, Senses(level=80, music=80))
         loud, _ = both.frame(BASE, Senses(level=80, music=80), DT, 3.0)
 
-        room = Reflex()
-        settle(room, Senses(level=80, music=0))
-        solo, _ = room.frame(BASE, Senses(level=80, music=0), DT, 3.0)
+        tap = Reflex()
+        settle(tap, Senses(level=0, music=80))
+        solo, _ = tap.frame(BASE, Senses(level=0, music=80), DT, 3.0)
         self.assertAlmostEqual(loud.val, solo.val, delta=0.5)
         self.assertAlmostEqual(loud.breath_amp, solo.breath_amp, delta=0.5)
+
+    def test_a_loud_room_alone_is_not_music(self):
+        room = Reflex()
+        settle(room, Senses(level=80, music=0))
+        look, _ = room.frame(BASE, Senses(level=80, music=0), DT, 3.0)
+        self.assertEqual(look.hue_cycles, 0)
+        self.assertGreater(look.val, BASE.val, "it brightens, it does not dance")
 
     def test_music_opens_the_eye_a_little(self):
         quiet, playing = Reflex(), Reflex()
@@ -164,7 +231,7 @@ class TestStartle(unittest.TestCase):
         r = Reflex()
         settle(r, Senses(level=5))
         _, cmds = r.frame(BASE, Senses(level=90), DT, 3.0)
-        self.assertEqual(cmds, ["K,2,255", "K,1"])
+        self.assertEqual(cmds, ["K,2,255"])
 
         # still loud a frame later: no second flash
         _, cmds = r.frame(BASE, Senses(level=90), DT, 3.04)
@@ -173,8 +240,22 @@ class TestStartle(unittest.TestCase):
         # after the cooldown a new jump starts a new one
         settle(r, Senses(level=5), frames=10)
         _, cmds = r.frame(BASE, Senses(level=95), DT, 6.0)
-        self.assertEqual(cmds, ["K,2,255", "K,1"])
+        self.assertEqual(cmds, ["K,2,255"])
         self.assertEqual(r.startles, 2)
+
+    def test_a_clap_sends_a_comet_round_the_ring(self):
+        r = Reflex()
+        settle(r, Senses(level=5))
+        r.frame(BASE, Senses(level=90), DT, 3.0)
+        look = None
+        for i in range(1, 10):
+            look, _ = r.frame(BASE, Senses(level=5), DT, 3.0 + i * DT)
+        self.assertGreater(look.shape, 80, "a narrow band")
+        self.assertGreater(look.wave_amp, 90)
+        self.assertGreater(look.wave_hz, 80, "about one lap per second")
+        for i in range(10, 80):
+            look, _ = r.frame(BASE, Senses(level=5), DT, 3.0 + i * DT)
+        self.assertLess(look.shape, 1.0, "and it is gone afterwards")
 
     def test_a_gradual_swell_is_not_a_startle(self):
         r = Reflex()
@@ -188,11 +269,89 @@ class TestStartle(unittest.TestCase):
         self.assertEqual(cmds, [])
 
 
+class TestStillness(unittest.TestCase):
+    def test_a_silent_room_is_almost_still(self):
+        r = Reflex()
+        settle(r, Senses())
+        look, _ = r.frame(BASE, Senses(), DT, 3.0)
+        self.assertLess(look.breath_amp, 12, "the whole lamp does not pulse")
+        self.assertAlmostEqual(look.wave_amp, BASE.wave_amp, delta=1.0, msg="it flows")
+        self.assertAlmostEqual(look.wave_hz, BASE.wave_hz, delta=1.0)
+        self.assertEqual(look.sparkle, 0.0)
+
+    def test_a_voice_makes_sparks_and_louder_makes_more(self):
+        soft, loud = Reflex(), Reflex()
+        settle(soft, Senses(level=35))
+        settle(loud, Senses(level=80))
+        s, _ = soft.frame(BASE, Senses(level=35), DT, 3.0)
+        l, _ = loud.frame(BASE, Senses(level=80), DT, 3.0)
+        self.assertGreater(s.sparkle, 8)
+        self.assertGreater(l.sparkle, s.sparkle + 15)
+
+    def test_an_effect_is_not_stilled(self):
+        r = Reflex()
+        r.performing = True
+        settle(r, Senses())
+        look, _ = r.frame(BASE, Senses(), DT, 3.0)
+        self.assertAlmostEqual(look.wave_amp, BASE.wave_amp, delta=0.5)
+
+    def test_a_reverse_flow_survives_the_reflex(self):
+        r = Reflex()
+        look, _ = r.frame(replace(BASE, wave_hz=-20.0), Senses(level=60), DT, 0.0)
+        self.assertLess(look.wave_hz, 0.0)
+
+
+class TestArrival(unittest.TestCase):
+    def test_coming_back_to_the_mac_is_greeted_once(self):
+        r = Reflex()
+        settle(r, Senses(idle_s=90))
+        look, cmds = r.frame(BASE, Senses(idle_s=1), DT, 3.0)
+        self.assertEqual(cmds, ["K,0"])
+        self.assertGreater(look.open, BASE.open, "it opens up at once")
+        _, cmds = r.frame(BASE, Senses(idle_s=1), DT, 3.04)
+        self.assertEqual(cmds, [], "one greeting per return")
+        self.assertEqual(r.greetings, 1)
+
+    def test_an_empty_desk_turns_blue_and_a_touch_brings_amber_back(self):
+        r = Reflex()
+        settle(r, Senses(idle_s=90))
+        gone, _ = r.frame(BASE, Senses(idle_s=90), DT, 3.0)
+        self.assertAlmostEqual(gone.hue, 170.0, delta=3.0)
+        self.assertGreater(gone.breath_amp, 85, "asleep it dips to almost dark")
+        self.assertLess(gone.wave_amp, BASE.wave_amp * 0.3, "and stops flowing")
+        self.assertLess(gone.breath_hz, BASE.breath_hz * 2.6 * 0.7)
+        first, _ = r.frame(BASE, Senses(idle_s=0.5), DT, 3.04)
+        self.assertGreater(first.hue, 150.0, "the colour does not snap back")
+        back = first
+        for i in range(2, 100):
+            back, _ = r.frame(BASE, Senses(idle_s=0.5), DT, 3.0 + i * DT)
+        self.assertLess(abs(back.hue - BASE.hue), 10.0)
+
+    def test_a_resting_breath_is_about_a_persons(self):
+        r = Reflex()
+        settle(r, Senses())
+        look, _ = r.frame(BASE, Senses(), DT, 3.0)
+        period = 100.0 / look.breath_hz
+        self.assertGreater(period, 3.5)
+        self.assertLess(period, 6.0)
+
+    def test_someone_who_never_left_is_not_greeted(self):
+        r = Reflex()
+        settle(r, Senses(idle_s=6))
+        _, cmds = r.frame(BASE, Senses(idle_s=0), DT, 3.0)
+        self.assertEqual(cmds, [])
+
+
 class TestConfigAndAdapter(unittest.TestCase):
     def test_ease_is_applied_to_reflex_frames(self):
         r = Reflex(ReflexConfig(ease=120.0))
         look, _ = r.frame(BASE, Senses(), DT, 0.0)
         self.assertEqual(look.ease, 120.0)
+
+    def test_a_faster_look_is_not_slowed_down_by_the_reflex(self):
+        r = Reflex(ReflexConfig(ease=120.0))
+        look, _ = r.frame(replace(BASE, ease=40.0), Senses(), DT, 0.0)
+        self.assertEqual(look.ease, 40.0, "an effect can ask for a crisper attack")
 
     def test_as_senses_accepts_a_host_dict(self):
         senses = as_senses({"level": 42, "beat": 80, "prox": 150,

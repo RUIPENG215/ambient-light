@@ -7,9 +7,9 @@ firmware's internal model in [FIRMWARE-API.md](FIRMWARE-API.md).
 
 ## In one paragraph
 
-A paper lamp with 32 NeoPixels. A Feather nRF52840 Sense renders whatever eleven
+A paper lamp with 32 NeoPixels. A Feather nRF52840 Sense renders whatever fourteen
 numbers it is told, at 50 fps, and keeps its own amber fallback. A Python host on
-a Mac turns sensors into those eleven numbers 25 times a second (the **reflex**),
+a Mac turns sensors into those fourteen numbers 25 times a second (the **reflex**),
 and a single DeepSeek agent occasionally rewrites the base they are derived from
 (the **mind**). The agent is optional; the reflex is not.
 
@@ -19,18 +19,19 @@ and a single DeepSeek agent occasionally rewrites the base they are derived from
 |---|---|---|
 | MCU | Adafruit Feather nRF52840 Sense — Cortex-M4F, 1 MB flash, 256 KB RAM | 82,640 B flash / 9,340 B RAM used |
 | LEDs | 32 × WS2812B, 800 kHz, GRB, data on **D6** | through 330 Ω |
-| Power | external **5 V / 2 A**, common ground with the Feather | 32 LEDs full white ≈ 1.9 A; the firmware caps at 80/255 ≈ 0.6 A |
-| Buffer | 1000 µF across 5 V/GND at the strip | |
+| Power | external **5 V / 2 A** (3 A once servos are enabled), common ground with the Feather | 32 LEDs ≈ 0.9 A capped at 120; SG90 stall ≈ 700 mA each |
+| Buffer | 1000 µF across 5 V/GND at the strip and at the servos | |
 | Sensor | **APDS9960**, onboard, I2C | proximity + RGB/ALS |
 | Microphone | PDM, onboard | **no signal on this board** — hearing is done by the Mac |
-| Servo | SG90 reserved on **D5** | `ENABLE_SERVO 0`; the lid is light modulation for now |
+| Blades | 3 × 180° positional servos inside the ring, shafts radial 120° apart, on **D11/D9/D10** | **parked: `ENABLE_SERVO 0`**; 360° servos cannot hold an angle. When enabled: ~18° arc, per-servo end points, `B` command, `E,SERVO_OK/FAIL` at boot |
 | Range | VL53L0X (ToF) bought | **not wired** |
 | Enclosure | 10 cm ring, tracing paper cylinder, base, diffuser layer | without the diffuser you see 32 hot spots |
 
 ```
    Mac ──USB CDC──► Feather nRF52840 Sense ──D6 (330 Ω)──► 32 × WS2812B
                         │  I2C                                │ 5 V / GND
-                        └── APDS9960 (prox + lux)             └── 5 V 2 A + 1000 µF
+                        ├── APDS9960 (prox + lux)             ├── 5 V 3 A + 1000 µF
+                        └── D11/D9/D10 ──► 3 × SG90 blades   └── 5 V (servo rail)
 ```
 
 The USB cable is the only connection. The board never sees audio or the network.
@@ -44,23 +45,23 @@ Two processes, one wire.
 │                                                                          │
 │  fast    20 Hz   AudioMeter.level  ──────────────► state.level           │
 │  music   20 Hz   music_bus() (BlackHole or mic) ──► state.music/beat     │
-│  look    25 Hz   LookEngine: base_look + reflex  ──► "F" / "K" ──┐      │
+│  look    25 Hz   LookEngine: base + effect + reflex ──► "F" / "K" ──┐    │
 │  mind    3–10 s  one agent turn ──► base_look                    │      │
 │  control         unix socket /tmp/ambient-lamp.sock               │      │
 └───────────────────────────────────────────────────────────────────┼──────┘
                                                                     │ USB
 ┌─ webchat.py (separate process) ──────────────┐                    ▼
-│  http://127.0.0.1:8765 → the same socket     │            firmware 2.2.0
+│  http://127.0.0.1:8765 → the same socket     │            firmware 2.2.2
 │  owns no model                               │            50 fps render
 └──────────────────────────────────────────────┘                    │
                                                                     ▼
-                                                              32 LEDs
+                                                        32 LEDs + 3 blades
 ```
 
 Only **one** thread writes to the serial port: the `look` thread. Everything else
 talks to it through `state` or through the control socket.
 
-## The four pieces
+## The five pieces
 
 ### 1. `agent.py` — the mind
 
@@ -69,7 +70,7 @@ talks to it through `state` or through the control socket.
   breaker after three consecutive failures.
 - It is **not** in the 25 Hz path. A turn takes 800–1600 ms and ends by writing a
   *target*, then it leaves.
-- Tools: `set_light` (eleven continuous values, no enums), `blink`,
+- Tools: `set_light` (fourteen continuous values, no enums), `blink`,
   `set_reflex` (tune the reflex's own constants), `feel`, `remember`, `observe`.
 - When the situation carries a `said` field it must also answer in words, in the
   language the person used.
@@ -78,18 +79,30 @@ talks to it through `state` or through the control socket.
 
 ### 2. `looks.py` — the only thing that writes frames
 
-- `Look` is eleven floats with clamping and optional drift (`hue_drift`, …).
+- `Look` is fourteen floats with clamping and optional drift (`hue_drift`, …).
+  The last three (`hue_cycles`, `shape`, `sparkle`) are the v2.2.2 basis: full
+  hue turns, a sharpened wave, and random white glints.
 - `LookEngine` is a thread at 25 Hz. Each tick:
   1. ease the current value toward the target, with the target's `ease_ms`
      (same curve as the firmware: τ = ease_ms / 3000 s);
   2. apply the look's own drift;
-  3. call `reflex.frame(...)` once — this is where sensors enter;
-  4. format one `F` line and send it; send any `K` transients after it.
+  3. apply the active **effect** (`effects.py`: candle / heartbeat / ocean /
+     aurora), a temporary base with its own fade in/out;
+  4. call `reflex.frame(...)` once — this is where sensors enter;
+  5. format one `F` line and send it; send any `K` transients after it.
 - On start it sends `G,<cap>,<gamma>,<dither>` and `C,0,0,0,0` exactly once.
 - If a serial write fails it counts nothing and keeps going; the firmware's frame
   watchdog handles the outage.
 
-### 3. `reflex.py` — sensors into light
+### 3. `effects.py` — the performance layer
+
+Four named functions of time over the same 14 numbers. An effect is started by
+`lampctl effect`, the web page or the agent (`play_effect`), replaces the base
+for its duration, and leaves nothing behind. The reflex still rides on top
+because the effect is applied before it. The agent sees `lamp.effect` in its
+situation, so it knows what is already playing.
+
+### 4. `reflex.py` — sensors into light
 
 Not a thread and never a sender: a pure-ish transform called once per frame.
 
@@ -99,14 +112,14 @@ Not a thread and never a sender: a pure-ish transform called once per frame.
 | `beat` | a decaying pulse on `val` (+0–34) and a small lift of `open` (+6) | `beat_val`, `beat_decay_s`, `beat_open` |
 | `prox` | `open` +24, `val` +18, hue −10 (warmer), smoothed τ 0.25 s | `prox_open/val/hue` |
 | `lux` | brightness floor ×0.72…1.10, smoothed τ 2 s | `lux_floor`, `lux_gain` |
-| `idle_s` | up to −35% `val`, −17.5% `open` after 60 s | `idle_dim`, `idle_after_s` |
+| `idle_s` | up to −55% `val`, −27.5% `open` from 45 s to 4 min | `idle_dim`, `idle_after_s` |
 | level edge | `K,2,255` + `K,1` once, 2 s cooldown | `startle_jump`, `startle_step` |
 
 Order matters: additions first (sound, beat, proximity), then multiplications
 (lux, idle), so leaving the desk dims the beat as well. Every smoothing is
 `1 − exp(−dt/τ)`, so a slow frame does not change the feel.
 
-### 4. `firmware` — the body
+### 5. `firmware` — the body
 
 - Renders the frame it holds at 50 fps, interpolating with τ = `ease_ms`/3000.
 - Plays transients on their own timeline: a blink is 120/60/180 ms, which is
@@ -114,6 +127,10 @@ Order matters: additions first (sound, beat, proximity), then multiplications
 - Keeps a fallback look and a slow doze; 1.5 s without a frame eases into it.
 - Reports telemetry at 4 Hz and owns the link watchdog.
 - Knows colour field, spatial wave, envelope, transients. Does not know moods.
+- With `ENABLE_SERVO 1` (off by default): turns `open` into three servo pulses
+  on its own 50 Hz clock, so a `K` blink reaches the blades in 120 ms even though
+  host frames only arrive every 40 ms. The blades occlude; the LEDs are not
+  dimmed as well (`SERVO_DIM_LIGHT 0`).
 
 ## End to end
 
@@ -178,26 +195,30 @@ the frame rate, not the network.
 
 | Thing | Owner | Written by |
 |---|---|---|
-| `state.base_look` | the agent | `set_light`, or `lampctl light` as a debug writer |
+| `state.base_look` | the agent | `set_light`, `lampctl light` as a debug writer, or the quiet-rest floor |
 | the frame on the wire | `LookEngine` | nobody else |
+| the active effect | `EffectPlayer` | `lampctl effect`, the page, or the agent's `play_effect`; it expires by itself and never persists |
 | `state.json` (drives, memory) | the agent | `feel` / `remember` |
 | the look when the stream stops | firmware | its own fallback constants |
 | reflex constants | the agent at runtime | `set_reflex`, or `ReflexConfig` in code |
 
-Two writers into one target, one framer, one renderer. That is the whole
-ownership story.
+Three writers into one target, one framer, one renderer. The third writer is
+deliberately minimal: after `--rest-after` seconds (default 180) without a
+sound, a beat, a hand or a light change, `Host.mind_loop` writes
+`DEFAULT_LOOK` again so the lamp cannot stay stuck on a colour whose moment has
+passed. It is a floor under the agent, not a second mind.
 
 ## On the wire
 
 | Direction | Frame | Rate | Bytes |
 |---|---|---|---|
-| host → lamp | `F,…` | 25 Hz | ~37 |
+| host → lamp | `F,…` | 25 Hz | ~58 |
 | host → lamp | `K,…` | on events | 4–8 |
 | host → lamp | `G,…` and `C,0,0,0,0` | once per engine start | ~20 |
 | lamp → host | `S,…` | 4 Hz | ~25 |
 | lamp → host | `E,…` | on events | ~10 |
 
-About 1.1 kB/s, against ~11.5 kB/s of headroom. The only thing that can overflow
+About 1.6 kB/s, against ~11.5 kB/s of headroom. The only thing that can overflow
 the line is `T` (self-test), which blocks the loop for 1.2 s.
 
 ## When something is missing
@@ -220,14 +241,15 @@ the line is `T` (self-test), which blocks the loop for 1.2 s.
 - No audio leaves the computer, only numbers.
 - No second mind: the web page owns no model and the host has no fallback policy
   beyond the reflex.
-- No pixels on the wire: eleven numbers per frame, not 96 bytes of RGB, because a
-  dropped parameter frame is absorbed by the interpolation.
+- No pixels on the wire: fourteen numbers per frame, not 96 bytes of RGB, because
+  a dropped parameter frame is absorbed by the interpolation. Sparkle is the one
+  random thing, and it runs on the board.
 
 ## Size
 
 ```
-firmware      817 lines     70 self-checks
-host          3823 lines    76 unit tests
-host tests    1044 lines
+firmware     1000 lines     88 self-checks
+host          4293 lines    98 unit tests
+host tests    1227 lines
 docs          4 documents + this one
 ```

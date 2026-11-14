@@ -1,0 +1,12 @@
+#!/bin/bash
+# Ambient Lamp launcher. The app is a thin shell around the project folder:
+# it asks Terminal to run host/run_app.command, because Terminal already holds
+# the Documents-folder and microphone permissions an unsigned app cannot get.
+APP_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+HOST="$(dirname "$APP_DIR")/host"
+[ -e "$HOST/run_app.command" ] || HOST="/Users/wangruipeng/Documents/ID5402/Project/ambient-light/host"
+if [ ! -e "$HOST/run_app.command" ]; then
+  /usr/bin/osascript -e 'display alert "Ambient Lamp" message "Cannot find host/run_app.command. Keep Ambient Lamp.app inside the ambient-light folder."' >/dev/null 2>&1
+  exit 1
+fi
+exec /usr/bin/open -a Terminal "$HOST/run_app.command"

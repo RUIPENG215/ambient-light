@@ -4,9 +4,14 @@ The firmware does not know what "warm" or "curious" means any more; it only
 evaluates a parameter frame at 50 fps. This module is the one place that holds
 the vocabulary, so tuning the light never means reflashing anything.
 
-A `Look` is 11 numbers plus a little optional motion:
+A `Look` is 14 numbers plus a little optional motion:
 
     hue sat val grad wave_n wave_amp wave_hz breath_hz breath_amp open ease
+    hue_cycles shape sparkle
+
+The last three are the v2.2.2 basis expansion: enough hue turns to make a
+rainbow, a wave shape that can sharpen a sine into a comet, and random white
+glints for stars and embers. `wave_hz` is signed — negative reverses the flow.
 
 `LookEngine` streams it at ~25 Hz. The firmware interpolates between frames, so
 the host can be as sloppy as it likes (Python, GC, a sleeping laptop) and the
@@ -25,13 +30,16 @@ import time
 from dataclasses import dataclass, replace
 from typing import Optional
 
+from effects import GESTURES, EffectPlayer
 from reflex import as_senses
 
-# Wire order of the F command, see PROTOCOL.md.
+# Wire order of the F command, see PROTOCOL.md. The first eleven are v2.2;
+# the last three were appended in v2.2.2, so an older board simply ignores them.
 FIELD_ORDER = (
     "hue", "sat", "val", "grad",
     "wave_n", "wave_amp", "wave_hz",
     "breath_hz", "breath_amp", "open", "ease",
+    "hue_cycles", "shape", "sparkle",
 )
 
 FIELD_RANGE = {
@@ -41,11 +49,14 @@ FIELD_RANGE = {
     "grad": (-128, 127),
     "wave_n": (0, 16),
     "wave_amp": (0, 100),
-    "wave_hz": (0, 255),
+    "wave_hz": (-255, 255),
     "breath_hz": (0, 255),
     "breath_amp": (0, 100),
     "open": (0, 100),
     "ease": (0, 10000),
+    "hue_cycles": (0, 400),     # 0.01 turns: 100 = one full rainbow around the ring
+    "shape": (0, 100),          # 0 sine .. 100 narrow comet band
+    "sparkle": (0, 100),        # density of random white glints
 }
 
 
@@ -69,6 +80,11 @@ class Look:
     breath_amp: float = 55.0
     open: float = 55.0
     ease: float = 3000.0
+
+    # v2.2.2 basis
+    hue_cycles: float = 0.0     # 0.01 turns around the ring: 100 -> one rainbow
+    shape: float = 0.0          # 0 sine, 100 a narrow comet band
+    sparkle: float = 0.0        # density of random white glints
 
     # motion, applied by the engine rather than the firmware
     hue_drift: float = 0.0      # hue units per second
@@ -161,6 +177,8 @@ class LookEngine:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self.player = EffectPlayer()     # the performance layer, host-side
+        self.gestures = EffectPlayer(GESTURES)   # body language, 1-2 s each
 
     # ---- lifecycle ----
     def start(self, name: str, look: Look) -> None:
@@ -183,12 +201,30 @@ class LookEngine:
             self.started_at = time.monotonic()
             self.frames = 0      # keep "frames for N s" honest across switches
 
+    # ---- performance layer ----
+    def set_effect(self, name: str, seconds: Optional[float] = None,
+                   intensity: float = 1.0) -> None:
+        """Start a named effect; it fades out by itself."""
+        self.player.start(name, seconds, intensity)
+
+    def stop_effect(self) -> None:
+        self.player.stop()
+
+    def set_gesture(self, name: str, seconds: Optional[float] = None) -> None:
+        """A second or two of body language on top of whatever is showing."""
+        self.gestures.start(name, seconds, 1.0)
+
+    def stop_gesture(self, name: Optional[str] = None) -> None:
+        self.gestures.stop(name)
+
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
         self._thread = None
+        self.player.stop()
+        self.gestures.stop()
         with self._lock:
             self._look = None
 
@@ -221,9 +257,16 @@ class LookEngine:
             with self._lock:
                 self._shown = eased
             frame = eased.evolved(now - started)
+            # The effect is a temporary *base*: applied before the reflex, so
+            # sound and hands still ride on top of it and it cannot outlive
+            # its own envelope.
+            frame = self.player.apply(frame, now)
+            frame = self.gestures.apply(frame, now)
             transients: list[str] = []
             if self.reflex is not None and self.senses is not None:
                 try:
+                    self.reflex.performing = (self.player.active(now)
+                                              or self.gestures.active(now))
                     senses = as_senses(self.senses())
                     frame, transients = self.reflex.frame(frame, senses, dt, now)
                 except Exception as exc:  # noqa: BLE001 - never kill the stream
@@ -281,4 +324,6 @@ class LookEngine:
             "line": self.last_line,
             "params": look.as_dict() if look else {},
             "reflex": self.reflex.snapshot() if self.reflex is not None else None,
+            "effect": self.player.status(),
+            "gesture": self.gestures.status(),
         }

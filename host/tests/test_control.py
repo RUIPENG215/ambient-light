@@ -102,6 +102,24 @@ class TestControlServer(unittest.TestCase):
         self.assertEqual(response["line"], "K,1")
         self.assertIn("K,1", self.link.lines)
 
+    def test_effect_plays_and_reports_itself(self):
+        response = send({"cmd": "effect", "name": "candle", "seconds": 5},
+                        self.socket_path)
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["effect"]["name"], "candle")
+
+        data = send({"cmd": "observe"}, self.socket_path)
+        self.assertEqual(data["lamp"]["effect"]["name"], "candle")
+
+        send({"cmd": "stop-effect"}, self.socket_path)
+        data = send({"cmd": "observe"}, self.socket_path)
+        self.assertIsNone(data["lamp"]["effect"])
+
+    def test_unknown_effect_is_an_error(self):
+        response = send({"cmd": "effect", "name": "disco"}, self.socket_path)
+        self.assertFalse(response["ok"])
+        self.assertIn("unknown effect", response["error"])
+
     def test_say_reaches_the_agent(self):
         response = send({"cmd": "say", "text": "a little darker"}, self.socket_path)
         self.assertTrue(response["ok"])

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Local web chat for the lamp.
+"""The lamp's face and panel, served locally.
 
-A small standalone front-end: it does not own the serial port, it talks to the
-already-running ambient_host.py control socket. That means you can close this
-page and the lamp keeps running; this process can also restart without
-disturbing the lamp.
+One page (`ui.html`) with two shapes: a small glowing ring that mirrors the
+paper lamp and shows what it says as speech bubbles, and — when opened — a
+panel to talk to it, mix colours, save named looks and try its gestures.
 
-    .venv/bin/python webchat.py --port 8765
-    open http://127.0.0.1:8765
+It owns no model and no serial port. Everything goes through the host's control
+socket, so there is still exactly one mind and one writer:
 
-With DEEPSEEK_API_KEY (in the environment or host/.env) the chat is driven by
-DeepSeek with four tools: lamp_light, lamp_blink, lamp_observe, lamp_release.
-Without a key it falls back to a few fixed intents so the page is still usable.
+    .venv/bin/python webchat.py --port 8765 --open     # in a browser
+    .venv/bin/python lamp_app.py                        # as the corner pet
+
+`lamp_app.py` puts the same page in a frameless always-on-top window.
 """
 
 from __future__ import annotations
@@ -25,318 +25,31 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
+import paths
 from lampctl import send as control_send
 
 LOG = logging.getLogger("webchat")
 HERE = Path(__file__).resolve().parent
-HISTORY_PATH = HERE / "webchat_history.json"
+HISTORY_PATH = paths.data_dir() / "webchat_history.json"
 DEFAULT_SOCKET = os.environ.get("AMBIENT_SOCK", "/tmp/ambient-lamp.sock")
+UI_PATH = HERE / "ui.html"
 
-HTML = r"""<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ambient Lamp</title>
-<style>
-  :root {
-    --bg: #15120e;
-    --panel: #201b15;
-    --panel-2: #2a231b;
-    --line: #3a3025;
-    --text: #f2e8d8;
-    --dim: #a99a86;
-    --accent: #ffb45e;
-    --accent-2: #ff8a5c;
-    --lamp: #35291d;
-    --ok: #8fce9b;
-    --bad: #e0776a;
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
-  body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
-    color: var(--text);
-    background: radial-gradient(80% 70% at 30% 0%, #2b2116 0%, var(--bg) 60%);
-  }
-  .app {
-    height: 100vh;
-    overflow: hidden;
-    display: grid;
-    grid-template-columns: 310px 1fr;
-    max-width: 1180px;
-    margin: 0 auto;
-  }
-  aside {
-    overflow-y: auto;
-    border-right: 1px solid var(--line);
-    padding: 26px 22px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    background: linear-gradient(180deg, rgba(255,180,94,.06), transparent 45%);
-  }
-  .brand { font-size: 20px; letter-spacing: .02em; font-weight: 650; }
-  .sub { color: var(--dim); font-size: 12px; margin-top: 4px; }
-  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
-  .dot.on { background: var(--ok); box-shadow: 0 0 10px rgba(143,206,155,.6); }
-  .dot.off { background: var(--bad); }
-  .status { display: flex; flex-direction: column; gap: 9px; }
-  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
-  .row span { color: var(--dim); }
-  .row b { font-weight: 550; font-variant-numeric: tabular-nums; }
-  .quick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: auto; }
-  button {
-    background: var(--panel-2);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 9px 10px;
-    font: inherit;
-    font-size: 13px;
-    cursor: pointer;
-    transition: border-color .15s, transform .05s;
-  }
-  button:hover { border-color: var(--accent); }
-  button:active { transform: translateY(1px); }
-  .foot { color: var(--dim); font-size: 11px; line-height: 1.5; }
-  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  .chatlog {
-    flex: 1 1 0;
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 30px 34px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .msg {
-    max-width: min(78%, 620px);
-    padding: 10px 14px;
-    border-radius: 14px;
-    line-height: 1.55;
-    font-size: 14px;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .msg.user { align-self: flex-end; background: var(--accent); color: #24170a; border-bottom-right-radius: 4px; }
-  .msg.lamp { align-self: flex-start; background: var(--lamp); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
-  .msg.sys { align-self: center; color: var(--dim); font-size: 12px; background: transparent; border: 1px dashed var(--line); }
-  .composer {
-    border-top: 1px solid var(--line);
-    padding: 14px 22px 18px;
-    display: flex;
-    gap: 10px;
-    align-items: flex-end;
-  }
-  textarea {
-    flex: 1;
-    resize: none;
-    min-height: 44px;
-    max-height: 140px;
-    background: var(--panel);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 11px 13px;
-    font: inherit;
-    font-size: 14px;
-    line-height: 1.4;
-    outline: none;
-  }
-  textarea:focus { border-color: var(--accent); }
-  #send {
-    background: var(--accent);
-    color: #24170a;
-    border: 0;
-    font-weight: 650;
-    padding: 11px 18px;
-    border-radius: 12px;
-  }
-  #send:disabled { opacity: .5; cursor: default; }
-  .hint { color: var(--dim); font-size: 11px; padding: 0 22px 10px; }
-  @media (max-width: 760px) {
-    .app { grid-template-columns: 1fr; height: auto; min-height: 100vh; overflow: visible; }
-    .chatlog { max-height: 60vh; }
-    aside { border-right: 0; border-bottom: 1px solid var(--line); padding: 18px; gap: 14px; }
-    .quick { margin-top: 0; }
-    .chatlog { padding: 18px; min-height: 55vh; }
-    .msg { max-width: 88%; }
-  }
-</style>
-</head>
-<body>
-<div class="app">
-  <aside>
-    <div>
-      <div class="brand">Ambient Lamp</div>
-      <div class="sub"><span id="dot" class="dot off"></span><span id="conn">connecting…</span></div>
-    </div>
-    <div class="status">
-      <div class="row"><span>mood</span><b id="mood">—</b></div>
-      <div class="row"><span>eyelid</span><b id="lid">—</b></div>
-      <div class="row"><span>proximity</span><b id="prox">—</b></div>
-      <div class="row"><span>light</span><b id="lux">—</b></div>
-      <div class="row"><span>music</span><b id="music">—</b></div>
-      <div class="row"><span>stream</span><b id="lease">—</b></div>
-      <div class="row"><span>mac</span><b id="mac">—</b></div>
-    </div>
-    <div class="quick">
-      <button data-action="darker">dimmer</button>
-      <button data-action="brighter">brighter</button>
-      <button data-action="flowing">more flow</button>
-      <button data-action="blink">blink</button>
-    </div>
-    <div class="foot" id="llm">DeepSeek: checking…</div>
-  </aside>
-  <main>
-    <div class="chatlog" id="log"></div>
-    <div class="hint">Enter to send, Shift+Enter for a new line. It answers with light, and with a few words.</div>
-    <div class="composer">
-      <textarea id="input" rows="1" placeholder="say something to it…"></textarea>
-      <button id="send">send</button>
-    </div>
-  </main>
-</div>
-<script>
-const $ = (id) => document.getElementById(id);
-const log = $("log");
-const input = $("input");
-const sendBtn = $("send");
+LIGHT_FIELDS = ("hue", "sat", "val", "grad", "wave_n", "wave_amp", "wave_hz",
+                "breath_hz", "breath_amp", "open", "ease",
+                "hue_cycles", "shape", "sparkle")
 
-function add(role, text) {
-  const el = document.createElement("div");
-  el.className = "msg " + role;
-  el.textContent = text;
-  log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
-  return el;
-}
 
-async function api(path, opts) {
-  const response = await fetch(path, opts);
-  if (!response.ok) throw new Error("HTTP " + response.status);
-  return response.json();
-}
-
-function setText(id, value) {
-  $(id).textContent = value;
-}
-
-function renderStatus(d) {
-  const online = !!d.online;
-  $("dot").className = "dot " + (online ? "on" : "off");
-  setText("conn", online ? "lamp online" : "lamp offline");
-  const lamp = d.lamp || {};
-  const sensors = d.sensors || {};
-  const music = d.music || {};
-  const mac = d.mac || {};
-  const light = lamp.light || {};
-  setText("mood", "hue " + (light.hue ?? 0) + " · val " + (light.val ?? 0));
-  setText("lid", (light.open ?? 0) + "%");
-  setText("prox", (sensors.prox ?? 0) + (sensors.prox >= 120 ? " · hand nearby" : ""));
-  setText("lux", (sensors.lux ?? 0) + " lx");
-  setText("music", (music.energy ?? 0) + "/100" + (mac.playing ? " · " + (mac.title || "playing") : ""));
-  setText("lease", lamp.stream || "off");
-  setText("mac", mac.user_present ? "at the desk" : "away " + (mac.idle_s ?? 0) + "s");
-  setText("llm", d.llm ? "agent: ready" : "agent: off · reflex only");
-}
-
-async function refresh() {
-  try {
-    renderStatus(await api("/api/status"));
-  } catch (err) {
-    $("dot").className = "dot off";
-    setText("conn", "webchat offline");
-  }
-}
-
-async function loadHistory() {
-  try {
-    const data = await api("/api/history");
-    for (const item of data.messages || []) {
-      add(item.role === "user" ? "user" : "lamp", item.content);
-    }
-  } catch (err) { /* first run */ }
-}
-
-async function send() {
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = "";
-  add("user", text);
-  sendBtn.disabled = true;
-  const thinking = add("sys", "the lamp is feeling…");
-  try {
-    const data = await api("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text })
-    });
-    thinking.remove();
-    add("lamp", data.reply || "……");
-  } catch (err) {
-    thinking.remove();
-    add("lamp", "I lost the thread for a moment.");
-  } finally {
-    sendBtn.disabled = false;
-    input.focus();
-    refresh();
-  }
-}
-
-async function action(name) {
-  try {
-    const data = await api("/api/action", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name })
-    });
-    add("lamp", data.ok ? "ok" : "failed: " + (data.error || "the lamp is not connected"));
-  } catch (err) {
-    add("lamp", "failed: the lamp is not connected.");
-  }
-  refresh();
-}
-
-sendBtn.addEventListener("click", send);
-input.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
-    event.preventDefault();
-    send();
-  }
-});
-document.querySelectorAll("[data-action]").forEach((btn) => {
-  btn.addEventListener("click", () => action(btn.dataset.action));
-});
-
-loadHistory();
-refresh();
-setInterval(refresh, 2000);
-input.focus();
-</script>
-</body>
-</html>
-"""
+def load_ui() -> bytes:
+    try:
+        return UI_PATH.read_bytes()
+    except OSError:
+        return b"<!doctype html><title>Ambient Lamp</title><p>ui.html is missing."
 
 
 def load_env() -> None:
-    path = HERE / ".env"
-    if not path.exists():
-        return
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    paths.load_env()
 
 
 class ChatEngine:
@@ -347,13 +60,15 @@ class ChatEngine:
     personality and one place where the light is decided.
     """
 
-    # Quick buttons are parameter writes, not modes.
+    # Quick actions are parameter writes or effects, not modes.
     ACTIONS = {
         "darker": {"cmd": "light", "val": 70, "ease": 2500, "reason": "page: darker"},
         "brighter": {"cmd": "light", "val": 175, "ease": 2500, "reason": "page: brighter"},
         "flowing": {"cmd": "light", "grad": 30, "wave_amp": 40, "wave_hz": 14,
                     "ease": 3000, "reason": "page: flowing"},
         "blink": {"cmd": "blink", "kind": "blink"},
+        "candle": {"cmd": "effect", "name": "candle", "seconds": 60},
+        "aurora": {"cmd": "effect", "name": "aurora", "seconds": 180},
     }
 
     def __init__(self, socket_path: str = DEFAULT_SOCKET) -> None:
@@ -365,23 +80,24 @@ class ChatEngine:
         self._load_history()
 
     # ---- control socket ----
-    def _control(self, request: dict, timeout: float = 20.0) -> dict:
+    def _control(self, request: dict, timeout: float = 20.0, quiet: bool = False) -> dict:
         try:
             result = control_send(request, self.socket_path, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - the page must stay alive
             result = {"ok": False, "online": False,
                       "error": f"{type(exc).__name__}: {exc}"}
-        if not result.get("ok"):
+        if not result.get("ok") and not quiet:
             LOG.warning("control %s failed: %s", request.get("cmd"),
                         result.get("error") or result)
-        self._status_cache = None
+        if request.get("cmd") != "feed":
+            self._status_cache = None
         return result
 
     def status(self) -> dict:
         now = time.monotonic()
         if self._status_cache is not None and now - self._status_at < 1.0:
             return self._status_cache
-        data = self._control({"cmd": "observe"}, timeout=4.0)
+        data = self._control({"cmd": "observe"}, timeout=4.0, quiet=True)
         if data.get("ok"):
             data["online"] = True
             data["llm"] = True          # the host answered, so it is running
@@ -392,12 +108,16 @@ class ChatEngine:
         self._status_at = now
         return data
 
+    def feed(self, since: int = 0) -> dict:
+        """The frame on the wire and anything the lamp said: polled ~12 Hz."""
+        return self._control({"cmd": "feed", "since": int(since)}, timeout=1.5, quiet=True)
+
     # ---- conversation ----
     def chat(self, message: str) -> str:
         text = " ".join(str(message).split())[:500]
         if not text:
             return "You have not said anything yet."
-        result = self._control({"cmd": "say", "text": text}, timeout=25.0)
+        result = self._control({"cmd": "say", "text": text}, timeout=30.0)
         if result.get("ok"):
             reply = str(result.get("reply") or "").strip()
             if not reply:
@@ -413,12 +133,66 @@ class ChatEngine:
         self._remember("assistant", reply)
         return reply
 
-    # ---- buttons ----
+    # ---- light, looks, movement ----
+    def light(self, data: dict) -> dict:
+        request: dict = {"cmd": "light", "reason": str(data.get("reason", "panel"))[:80]}
+        for key in LIGHT_FIELDS:
+            if data.get(key) is not None:
+                try:
+                    request[key] = float(data[key])
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": f"{key} must be a number"}
+        if data.get("hold") is not None:
+            request["hold"] = data["hold"]
+        return self._control(request, timeout=4.0)
+
     def action(self, name: str) -> dict:
         request = self.ACTIONS.get(str(name))
         if request is None:
             return {"ok": False, "error": f"unknown action {name!r}"}
         return self._control(dict(request), timeout=8.0)
+
+    def gesture(self, data: dict) -> dict:
+        request = {"cmd": "gesture", "name": str(data.get("name", ""))}
+        if data.get("seconds"):
+            request["seconds"] = data["seconds"]
+        return self._control(request, timeout=4.0)
+
+    def effect(self, data: dict) -> dict:
+        if data.get("stop"):
+            return self._control({"cmd": "stop-effect"}, timeout=4.0)
+        request = {"cmd": "effect", "name": str(data.get("name", ""))}
+        for key in ("seconds", "intensity"):
+            if data.get(key) is not None:
+                request[key] = data[key]
+        return self._control(request, timeout=4.0)
+
+    def looks(self, op: str = "looks", name: str = "") -> dict:
+        if op not in ("looks", "save_look", "recall_look", "forget_look"):
+            return {"ok": False, "error": "unknown look operation"}
+        return self._control({"cmd": op, "name": str(name)[:40]}, timeout=4.0)
+
+    # ---- the mind's key ----
+    def config(self) -> dict:
+        feed = self.feed(0)
+        return {
+            "ok": True,
+            "has_key": bool(os.environ.get("DEEPSEEK_API_KEY")),
+            "agent": bool(feed.get("agent")),
+            "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-flash"),
+        }
+
+    def set_key(self, key: str) -> dict:
+        key = str(key or "").strip()
+        if len(key) < 8:
+            return {"ok": False, "error": "that does not look like a key"}
+        result = self._control({"cmd": "set_key", "key": key}, timeout=8.0)
+        if result.get("ok"):
+            try:
+                paths.save_env_value("DEEPSEEK_API_KEY", key)   # for the next launch
+            except OSError as exc:
+                result["warning"] = f"could not save the key: {exc}"
+        return result
 
     # ---- history ----
     def _load_history(self) -> None:
@@ -442,18 +216,21 @@ class ChatEngine:
 
 
 class WebHandler(BaseHTTPRequestHandler):
-    server_version = "AmbientWeb/1.0"
+    server_version = "AmbientWeb/2.0"
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: ANN002
         LOG.debug("%s - %s", self.address_string(), fmt % args)
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass                         # the page went away mid-poll
 
     def _json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -461,13 +238,24 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         engine: ChatEngine = self.server.engine  # type: ignore[attr-defined]
-        path = self.path.split("?", 1)[0]
+        url = urlsplit(self.path)
+        path = url.path
         if path in ("/", "/index.html"):
-            self._send(200, "text/html; charset=utf-8", HTML.encode("utf-8"))
+            self._send(200, "text/html; charset=utf-8", load_ui())
+        elif path == "/api/feed":
+            try:
+                since = int(parse_qs(url.query).get("since", ["0"])[0])
+            except ValueError:
+                since = 0
+            self._json(engine.feed(since))
         elif path == "/api/status":
             self._json(engine.status())
         elif path == "/api/history":
             self._json({"messages": engine.history})
+        elif path == "/api/looks":
+            self._json(engine.looks())
+        elif path == "/api/config":
+            self._json(engine.config())
         else:
             self._json({"ok": False, "error": "not found"}, 404)
 
@@ -505,12 +293,25 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json({"ok": True, "reply": reply})
             return
 
-        if path == "/api/action":
-            name = str(data.get("name", ""))
-            self._json(engine.action(name))
+        routes = {
+            "/api/light": lambda: engine.light(data),
+            "/api/action": lambda: engine.action(str(data.get("name", ""))),
+            "/api/gesture": lambda: engine.gesture(data),
+            "/api/effect": lambda: engine.effect(data),
+            "/api/looks/save": lambda: engine.looks("save_look", data.get("name", "")),
+            "/api/looks/recall": lambda: engine.looks("recall_look", data.get("name", "")),
+            "/api/looks/forget": lambda: engine.looks("forget_look", data.get("name", "")),
+            "/api/config": lambda: engine.set_key(data.get("key", "")),
+        }
+        handler = routes.get(path)
+        if handler is None:
+            self._json({"ok": False, "error": "not found"}, 404)
             return
-
-        self._json({"ok": False, "error": "not found"}, 404)
+        try:
+            self._json(handler())
+        except Exception as exc:  # noqa: BLE001 - keep the page alive
+            LOG.exception("%s failed", path)
+            self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 500)
 
 
 class WebServer(ThreadingHTTPServer):
@@ -522,8 +323,16 @@ class WebServer(ThreadingHTTPServer):
         super().__init__(address, WebHandler)
 
 
+def serve_in_thread(port: int = 8765, socket_path: str = DEFAULT_SOCKET,
+                    host: str = "127.0.0.1") -> WebServer:
+    """Start the page server on a daemon thread and return it (for the app)."""
+    server = WebServer((host, port), ChatEngine(socket_path))
+    threading.Thread(target=server.serve_forever, name="web", daemon=True).start()
+    return server
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Local web chat for the ambient lamp")
+    parser = argparse.ArgumentParser(description="The lamp's face and panel, served locally")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
@@ -554,7 +363,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nbye")
+        pass
     finally:
         server.server_close()
     return 0

@@ -84,6 +84,7 @@ class ControlServer:
         reflex=None,
         senses=None,
         say=None,
+        extra=None,
     ) -> None:
         self.link = link
         self.state = state
@@ -93,6 +94,8 @@ class ControlServer:
         self.log = logger or logging.getLogger("control")
         self.senses = senses
         self.say_fn = say
+        # more commands supplied by the host: name -> callable(request) -> dict
+        self.extra = dict(extra or {})
         self._server: Optional[_ControlServer] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -165,13 +168,31 @@ class ControlServer:
             return self.set_light(request)
         if cmd == "blink":
             return self.blink(request)
+        if cmd == "effect":
+            return self.play_effect(request)
+        if cmd in ("stop-effect", "stop_effect"):
+            self.engine.stop_effect()
+            return {"ok": True, "effect": None}
         if cmd == "say":
             return self.say(request)
+        if cmd == "gesture":
+            name = str(request.get("name") or request.get("kind") or "").strip().lower()
+            try:
+                self.engine.set_gesture(name, request.get("seconds") or None)
+            except ValueError as exc:
+                raise ControlError(str(exc))
+            return {"ok": True, "gesture": self.engine.status().get("gesture")}
+        if cmd in self.extra:
+            result = self.extra[cmd](request)
+            if isinstance(result, dict):
+                result.setdefault("ok", True)
+                return result
+            return {"ok": True, "result": result}
         raise ControlError(f"unknown command {cmd!r}")
 
     # ---------------- commands ----------------
     def set_light(self, request: dict) -> dict:
-        """Write a few of the 11 numbers; the rest keep their value."""
+        """Write a few of the 14 numbers; the rest keep their value."""
         clean = {
             key: float(request[key])
             for key in FIELD_ORDER
@@ -191,6 +212,13 @@ class ControlServer:
                 self.engine.start("control", look)
             self.state.last_sent = look.line()
             self.state.last_sent_at = time.monotonic()
+            try:
+                hold = max(0.0, min(6 * 3600.0, float(request.get("hold", 0) or 0)))
+            except (TypeError, ValueError):
+                hold = 0.0
+            if hold > 0 and hasattr(self.state, "hold_until"):
+                # a look mixed by hand stays until the person lets go of it
+                self.state.hold_until = time.monotonic() + hold
             self.store.save()
 
         return {"ok": True, "line": look.line(), "params": look.fields(),
@@ -204,6 +232,24 @@ class ControlServer:
         except Exception:  # noqa: BLE001
             ok = False
         return {"ok": ok, "line": cmd}
+
+    def play_effect(self, request: dict) -> dict:
+        name = str(request.get("name") or request.get("kind") or "").strip().lower()
+        if not name:
+            raise ControlError("effect needs a name")
+        try:
+            seconds = float(request.get("seconds", 0) or 0)
+        except (TypeError, ValueError):
+            raise ControlError("seconds must be a number")
+        try:
+            intensity = float(request.get("intensity", 1.0))
+        except (TypeError, ValueError):
+            raise ControlError("intensity must be a number")
+        try:
+            self.engine.set_effect(name, seconds or None, intensity)
+        except ValueError as exc:
+            raise ControlError(str(exc))
+        return {"ok": True, "effect": self.engine.status().get("effect")}
 
     def say(self, request: dict) -> dict:
         text = str(request.get("text") or request.get("message") or "").strip()
@@ -246,6 +292,7 @@ class ControlServer:
                 "frames": look["frames"],
                 "hz": look["hz"],
                 "line": look["line"],
+                "effect": look.get("effect"),
             },
             "sensors": {
                 "prox": int(raw.prox),
